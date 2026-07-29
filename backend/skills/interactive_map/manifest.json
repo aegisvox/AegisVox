@@ -1,0 +1,18 @@
+{
+  "name": "interactive-map",
+  "description": "Show an interactive map view for the given location.",
+  "script": "index.py",
+  "display": {
+    "mode": "fullscreen",
+    "canvas": true,
+    "permissions": ["screen_display"]
+  },
+  "inputs": {
+    "location": {
+      "type": "string",
+      "required": true,
+      "description": "The location to show on the map"
+    }
+  },
+  "category": "utility"
+}

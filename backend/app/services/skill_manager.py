@@ -1,7 +1,8 @@
+import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class Skill:
@@ -9,6 +10,8 @@ class Skill:
     description: str
     instructions: str
     root_path: str
+    manifest: Dict[str, Any] = field(default_factory=dict)
+    permissions: List[str] = field(default_factory=list)
 
 class SkillManager:
     def __init__(self, skills_dir: str = "backend/skills"):
@@ -50,11 +53,31 @@ class SkillManager:
                     key, val = line.split(":", 1)
                     meta[key.strip()] = val.strip().strip("'\"")
 
+            manifest_data = {}
+            permissions: List[str] = []
+            manifest_path = os.path.join(root_path, "manifest.json")
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, "r", encoding="utf-8") as mf:
+                        manifest_data = json.load(mf)
+                except Exception:
+                    manifest_data = {}
+
+            display_data = manifest_data.get("display")
+            if isinstance(display_data, dict):
+                raw_permissions = display_data.get("permissions", [])
+                if isinstance(raw_permissions, str):
+                    permissions = [raw_permissions]
+                elif isinstance(raw_permissions, list):
+                    permissions = [p for p in raw_permissions if isinstance(p, str)]
+
             return Skill(
                 name=meta.get("name", os.path.basename(root_path)),
                 description=meta.get("description", "No description provided."),
                 instructions=body.strip(),
-                root_path=root_path
+                root_path=root_path,
+                manifest=manifest_data,
+                permissions=permissions,
             )
         except Exception as e:
             print(f"[SkillManager] Failed to load {file_path}: {e}")
