@@ -45,5 +45,7 @@ next-env.d.
 backend/models
 
 #cache
-backend/app/__pycache__
-backend/app/services/__pycache__
+__pycache__
+
+#internals
+.aegisvox

@@ -2,11 +2,7 @@
   "name": "interactive-map",
   "description": "Show an interactive map view for the given location.",
   "script": "index.py",
-  "display": {
-    "mode": "fullscreen",
-    "canvas": true,
-    "permissions": ["screen_display"]
-  },
+  "permissions": ["app.display.showDataOnCanvas"],
   "inputs": {
     "location": {
       "type": "string",

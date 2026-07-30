@@ -1,0 +1,7 @@
+{
+    "app.display.showDataOnCanvas": {
+        "description": "Allows the skill to display data on the app's canvas.",
+        "authorizationRequired": true,
+        "authorizationMessage": "{skillName} requires permission to display data on the app's canvas. Do you want to allow this?"
+    }
+}

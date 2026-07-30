@@ -14,8 +14,21 @@ def main():
             return
 
         encoded_location = quote(location)
+        html = f"""
+        <div class="rounded-[20px] border border-cyan-400/20 bg-slate-900/90 text-slate-100">
+          <iframe
+            src="https://www.google.com/maps?q={encoded_location}&output=embed"
+            class="h-[220px] w-full rounded-[16px] border-0"
+            loading="lazy"
+            allowfullscreen
+          ></iframe>
+        </div>
+        """
         print(json.dumps({
             "success": True,
+            "mode": "bubble",
+            "placement": "center",
+            "html": html,
             "data": {
                 "location": location,
                 "map_url": f"https://www.google.com/maps?q={encoded_location}&output=embed"
