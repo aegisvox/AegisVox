@@ -1,6 +1,8 @@
 import json
 import os
 import re
+from typing import Optional
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -44,6 +46,88 @@ def get_combined_prompt(user_query: str) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{skills_context}\n\nUser Question: {user_query}"
 
 
+async def stream_assistant_reply(websocket: WebSocket, ai_reply: str, voice: str) -> None:
+    await websocket.send_json({"type": "response_start"})
+
+    for sentence_text, wav_bytes in tts.synthesize_stream(ai_reply, voice=voice):
+        await websocket.send_json({"type": "speech_chunk", "text": sentence_text})
+        await websocket.send_bytes(wav_bytes)
+
+    await websocket.send_json({"type": "response_end"})
+
+
+async def execute_skill_request(
+    websocket: WebSocket,
+    *,
+    user_text: str,
+    skill_name: str,
+    script_name: str,
+    script_params: dict,
+    voice: str,
+) -> tuple[Optional[str], bool]:
+    skill = skill_manager.skills.get(skill_name)
+    if skill:
+        for permission in skill.permissions:
+            permission_details = skill.permission_definitions.get(permission, {})
+            requires_authorization = bool(permission_details.get("authorizationRequired", False))
+            if not requires_authorization:
+                continue
+
+            token = script_params.pop("grant_token", None)
+            stored_token = permission_manager.get_grant_token(skill_name, permission)
+            if not token and stored_token:
+                token = stored_token
+
+            if not permission_manager.is_permission_granted(skill_name, permission, token or ""):
+                await websocket.send_json({
+                    "type": "permission_required",
+                    "skill": skill_name,
+                    "permission": permission,
+                    "message": permission_details.get(
+                        "authorizationMessage",
+                        f"{skill_name} needs permission to continue."
+                    ),
+                })
+                return None, True
+
+    print(f"⚙️ [Executing Skill] Skill: '{skill_name}' | Script: '{script_name}'")
+    await websocket.send_json({
+        "type": "skill_start",
+        "name": skill_name,
+        "description": f"Opening {skill_name.replace('-', ' ')} view..."
+    })
+
+    success, script_output = agent_tools.run_script(
+        skill_name=skill_name,
+        script_name=script_name,
+        data=script_params
+    )
+
+    if not success:
+        print(f"⚠️ [Skill Execution Failed] {script_output}")
+        await websocket.send_json({
+            "type": "skill_end",
+            "name": skill_name,
+            "output": json.dumps({"success": False, "error": script_output})
+        })
+        return f"I tried to run the requested skill, but it failed: {script_output}", False
+
+    print(f"📊 [Skill Result] {script_output}")
+    await websocket.send_json({
+        "type": "skill_end",
+        "name": skill_name,
+        "output": script_output
+    })
+
+    followup_prompt = (
+        f"The user asked: '{user_text}'.\n"
+        f"You executed skill '{skill_name}' and got result:\n{script_output}\n"
+        f"Summarize this answer in a conversational, spoken tone."
+    )
+    ai_reply = llm.generate_response(followup_prompt)
+    return ai_reply, False
+
+
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -54,6 +138,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
     
     # 🎙️ Set default voice for this user session
     current_voice = "af_heart"
+    pending_skill_request: Optional[dict] = None
     
     try:
         while True:
@@ -95,6 +180,22 @@ async def websocket_live_endpoint(websocket: WebSocket):
                                 "permission": permission,
                                 "grant_token": token
                             })
+                            if pending_skill_request is not None:
+                                request = pending_skill_request
+                                pending_skill_request = None
+                                ai_reply, permission_required = await execute_skill_request(
+                                    websocket,
+                                    user_text=request["user_text"],
+                                    skill_name=request["skill_name"],
+                                    script_name=request["script_name"],
+                                    script_params=request["script_params"],
+                                    voice=current_voice,
+                                )
+                                if permission_required:
+                                    continue
+                                if ai_reply is not None:
+                                    await stream_assistant_reply(websocket, ai_reply, current_voice)
+                                continue
                         else:
                             await websocket.send_json({
                                 "type": "permission_denied",
@@ -139,55 +240,23 @@ async def websocket_live_endpoint(websocket: WebSocket):
                     skill_name = tool_data.get("skill")
                     script_name = tool_data.get("script")
                     script_params = dict(tool_data.get("data", {}) or {})
-                    
-                    skill = skill_manager.skills.get(skill_name)
-                    if skill and "aegisvox.screen.showDataOnScreen" in skill.permissions:
-                        permission = "aegisvox.screen.showDataOnScreen"
-                        token = script_params.pop("grant_token", None)
-                        stored_token = permission_manager.get_grant_token(skill_name, permission)
-                        if not token and stored_token:
-                            token = stored_token
 
-                        if not permission_manager.is_permission_granted(skill_name, permission, token or ""):
-                            raise PermissionError(
-                                "Screen display permission denied. Grant permission first using the device verification code."
-                            )
-
-                    print(f"⚙️ [Executing Skill] Skill: '{skill_name}' | Script: '{script_name}'")
-                    await websocket.send_json({
-                        "type": "skill_start",
-                        "name": skill_name,
-                        "description": f"Opening {skill_name.replace('-', ' ')} view..."
-                    })
-                    
-                    success, script_output = agent_tools.run_script(
+                    pending_skill_request = {
+                        "user_text": user_text,
+                        "skill_name": skill_name,
+                        "script_name": script_name,
+                        "script_params": script_params,
+                    }
+                    ai_reply, permission_required = await execute_skill_request(
+                        websocket,
+                        user_text=user_text,
                         skill_name=skill_name,
                         script_name=script_name,
-                        data=script_params
+                        script_params=script_params,
+                        voice=current_voice,
                     )
-                    
-                    if not success:
-                        print(f"⚠️ [Skill Execution Failed] {script_output}")
-                        await websocket.send_json({
-                            "type": "skill_end",
-                            "name": skill_name,
-                            "output": json.dumps({"success": False, "error": script_output})
-                        })
-                        ai_reply = f"I tried to run the requested skill, but it failed: {script_output}"
-                    else:
-                        print(f"📊 [Skill Result] {script_output}")
-                        await websocket.send_json({
-                            "type": "skill_end",
-                            "name": skill_name,
-                            "output": script_output
-                        })
-                        
-                        followup_prompt = (
-                            f"The user asked: '{user_text}'.\n"
-                            f"You executed skill '{skill_name}' and got result:\n{script_output}\n"
-                            f"Summarize this answer in a conversational, spoken tone."
-                        )
-                        ai_reply = llm.generate_response(followup_prompt)
+                    if permission_required:
+                        continue
 
                 except Exception as e:
                     print(f"⚠️ [Skill Execution Failed] {e}")
@@ -197,25 +266,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
             # --- 4. STREAM SYNCHRONOUS TTS AUDIO & TEXT CHUNKS ---
             print(f"🗣️ [Streaming Sync Output] {ai_reply}")
-            
-            # Tell frontend to prepare an empty AI message bubble
-            await websocket.send_json({"type": "response_start"})
-            
-            # Stream each sentence and its matching audio instantly
-            for sentence_text, wav_bytes in tts.synthesize_stream(ai_reply, voice=current_voice):
-                print(f"🗣️ [Streaming Chunk] {sentence_text}")
-                
-                # Send the text for this sentence first
-                await websocket.send_json({
-                    "type": "speech_chunk", 
-                    "text": sentence_text
-                })
-                
-                # Immediately send the audio bytes for this exact sentence
-                await websocket.send_bytes(wav_bytes)
-                
-            # Tell frontend the AI has finished sending all chunks for this turn
-            await websocket.send_json({"type": "response_end"})
+            await stream_assistant_reply(websocket, ai_reply, current_voice)
             
     except WebSocketDisconnect:
         print("🛑 [WebSocket] Client Disconnected.")

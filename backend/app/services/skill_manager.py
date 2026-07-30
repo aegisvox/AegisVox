@@ -12,12 +12,38 @@ class Skill:
     root_path: str
     manifest: Dict[str, Any] = field(default_factory=dict)
     permissions: List[str] = field(default_factory=list)
+    permission_definitions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 class SkillManager:
-    def __init__(self, skills_dir: str = "backend/skills"):
+    def __init__(self, skills_dir: str = "backend/skills", permissions_path: Optional[str] = "backend/permissions.json"):
         self.skills_dir = skills_dir
+        self.permissions_path = permissions_path
+        self.permissions_catalog: Dict[str, Dict[str, Any]] = self._load_permissions_catalog()
         self.skills: Dict[str, Skill] = {}
         self.reload_skills()
+
+    def _load_permissions_catalog(self) -> Dict[str, Dict[str, Any]]:
+        if not self.permissions_path:
+            return {}
+
+        if not os.path.exists(self.permissions_path):
+            return {}
+
+        try:
+            with open(self.permissions_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except Exception as exc:
+            print(f"[SkillManager] Failed to load permissions catalog: {exc}")
+            return {}
+
+        if not isinstance(raw_data, dict):
+            return {}
+
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for permission_name, metadata in raw_data.items():
+            if isinstance(permission_name, str) and isinstance(metadata, dict):
+                catalog[permission_name] = metadata
+        return catalog
 
     def reload_skills(self):
         """Scans the backend/skills directory and loads all SKILL.md files."""
@@ -63,13 +89,27 @@ class SkillManager:
                 except Exception:
                     manifest_data = {}
 
+            raw_permissions: List[str] = []
             display_data = manifest_data.get("display")
             if isinstance(display_data, dict):
                 raw_permissions = display_data.get("permissions", [])
-                if isinstance(raw_permissions, str):
-                    permissions = [raw_permissions]
-                elif isinstance(raw_permissions, list):
-                    permissions = [p for p in raw_permissions if isinstance(p, str)]
+
+            manifest_permissions = manifest_data.get("permissions", [])
+            if isinstance(manifest_permissions, str):
+                manifest_permissions = [manifest_permissions]
+            elif not isinstance(manifest_permissions, list):
+                manifest_permissions = []
+
+            combined_permissions = []
+            for permission in [*raw_permissions, *manifest_permissions]:
+                if isinstance(permission, str) and permission not in combined_permissions:
+                    combined_permissions.append(permission)
+
+            permission_definitions = {
+                permission: self.permissions_catalog.get(permission, {})
+                for permission in combined_permissions
+                if permission in self.permissions_catalog
+            }
 
             return Skill(
                 name=meta.get("name", os.path.basename(root_path)),
@@ -77,7 +117,8 @@ class SkillManager:
                 instructions=body.strip(),
                 root_path=root_path,
                 manifest=manifest_data,
-                permissions=permissions,
+                permissions=combined_permissions,
+                permission_definitions=permission_definitions,
             )
         except Exception as e:
             print(f"[SkillManager] Failed to load {file_path}: {e}")
