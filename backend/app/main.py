@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -12,9 +13,23 @@ from backend.app.services.llm_service import LLMService
 from backend.app.services.tts_service import TTSService
 from backend.app.services.skill_manager import SkillManager
 from backend.app.services.agent_tools import AgentTools
+from backend.app.services.db_service import DBService
 from backend.app.services.tool_call_parser import extract_tool_call
+from backend.app.services.model_manager import get_models_status, install_missing_models
 
 app = FastAPI(title="GemmaLive Backend", version="1.0.0")
+
+@app.get("/models/status")
+async def models_status():
+    return get_models_status()
+
+@app.post("/models/install")
+async def models_install():
+    if get_models_status().get("installing"):
+        return {"started": False, "message": "Installation already in progress."}
+
+    threading.Thread(target=install_missing_models, daemon=True).start()
+    return {"started": True, "installing": True, "message": "Model installation started."}
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +43,8 @@ app.add_middleware(
 stt = STTService()
 llm = LLMService()
 tts = TTSService()
+
+db_service = DBService()
 
 # Initialize Agent Skills
 skill_manager = SkillManager(skills_dir="backend/skills")
@@ -46,18 +63,18 @@ def get_combined_prompt(user_query: str) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{skills_context}\n\nUser Question: {user_query}"
 
 
-async def stream_assistant_reply(websocket: WebSocket, ai_reply: str, voice: str) -> None:
+async def stream_assistant_reply(websocket: WebSocket, prompt: str) -> None:
     await websocket.send_json({"type": "response_start"})
 
-    for sentence_text, wav_bytes in tts.synthesize_stream(ai_reply, voice=voice):
-        await websocket.send_json({"type": "speech_chunk", "text": sentence_text})
-        await websocket.send_bytes(wav_bytes)
+    for text_chunk in llm.stream_response(prompt):
+        await websocket.send_json({"type": "speech_chunk", "text": text_chunk})
 
     await websocket.send_json({"type": "response_end"})
 
 
 async def execute_skill_request(
     websocket: WebSocket,
+    session_id: int,
     *,
     user_text: str,
     skill_name: str,
@@ -113,6 +130,7 @@ async def execute_skill_request(
         return f"I tried to run the requested skill, but it failed: {script_output}", False
 
     print(f"📊 [Skill Result] {script_output}")
+    db_service.log_message(session_id, "system", script_output)
     await websocket.send_json({
         "type": "skill_end",
         "name": skill_name,
@@ -139,6 +157,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
     # 🎙️ Set default voice for this user session
     current_voice = "af_heart"
     pending_skill_request: Optional[dict] = None
+    session_id = db_service.create_session()
     
     try:
         while True:
@@ -162,6 +181,28 @@ async def websocket_live_endpoint(websocket: WebSocket):
                         await websocket.send_json({
                             "type": "device_code",
                             "code": permission_manager.get_device_verification_code()
+                        })
+                        continue
+
+                    elif payload.get("type") == "get_model_status":
+                        await websocket.send_json({
+                            "type": "model_status",
+                            **get_models_status(),
+                        })
+                        continue
+
+                    elif payload.get("type") == "install_models":
+                        if get_models_status().get("installing"):
+                            await websocket.send_json({
+                                "type": "model_status",
+                                **get_models_status(),
+                            })
+                            continue
+
+                        threading.Thread(target=install_missing_models, daemon=True).start()
+                        await websocket.send_json({
+                            "type": "model_status",
+                            **get_models_status(),
                         })
                         continue
 
@@ -194,7 +235,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
                                 if permission_required:
                                     continue
                                 if ai_reply is not None:
-                                    await stream_assistant_reply(websocket, ai_reply, current_voice)
+                                    await stream_assistant_reply(websocket, ai_reply)
                                 continue
                         else:
                             await websocket.send_json({
@@ -224,6 +265,8 @@ async def websocket_live_endpoint(websocket: WebSocket):
                 
             if not user_text:
                 continue
+
+            db_service.log_message(session_id, "user", user_text)
                 
             # --- 3. GENERATE AI RESPONSE & INTERCEPT AGENT SKILLS ---
             print(f"🤖 [Gemma Answer Generated] Processing turn...")
@@ -249,6 +292,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
                     }
                     ai_reply, permission_required = await execute_skill_request(
                         websocket,
+                        session_id,
                         user_text=user_text,
                         skill_name=skill_name,
                         script_name=script_name,
@@ -264,11 +308,15 @@ async def websocket_live_endpoint(websocket: WebSocket):
             else:
                 ai_reply = raw_ai_reply
 
-            # --- 4. STREAM SYNCHRONOUS TTS AUDIO & TEXT CHUNKS ---
-            print(f"🗣️ [Streaming Sync Output] {ai_reply}")
-            await stream_assistant_reply(websocket, ai_reply, current_voice)
+            db_service.log_message(session_id, "assistant", ai_reply)
+
+            # --- 4. STREAM LLM TEXT RESPONSE CHUNKS ---
+            print(f"🗣️ [Streaming LLM Output] {user_text}")
+            await stream_assistant_reply(websocket, ai_reply)
             
     except WebSocketDisconnect:
         print("🛑 [WebSocket] Client Disconnected.")
     except Exception as e:
         print(f"⚠️ [WebSocket] Error during session: {e}")
+    finally:
+        db_service.close()

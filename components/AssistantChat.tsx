@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import 'xterm/css/xterm.css';
 
 type SkillCanvasState = {
   active: boolean;
@@ -20,7 +21,18 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  html?: string;
   isStreaming?: boolean;
+};
+
+type ModelStatus = {
+  llmReady: boolean;
+  whisperReady: boolean;
+  ttsReady: boolean;
+  installing: boolean;
+  progress: number;
+  message: string;
+  error: string | null;
 };
 
 type AuthorizationPromptState = {
@@ -40,36 +52,146 @@ function renderMarkdownContent(text: string) {
   );
 }
 
+function HtmlContent({ html }: { html: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const previousHtml = useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    if (previousHtml.current === html) return;
+    containerRef.current.innerHTML = html;
+    previousHtml.current = html;
+  }, [html]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="prose prose-invert max-w-none text-sm leading-7 text-slate-200 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:overflow-x-auto prose-pre:rounded-2xl prose-pre:border prose-pre:border-cyan-400/20 prose-pre:bg-slate-950/70 prose-pre:p-3 prose-code:rounded prose-code:bg-slate-800/80 prose-code:px-1.5 prose-code:py-0.5 prose-code:font-mono prose-code:text-cyan-300 prose-a:text-cyan-300 prose-a:no-underline hover:prose-a:underline"
+    />
+  );
+}
+
 export default function AssistantChat() {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [skillCanvas, setSkillCanvas] = useState<SkillCanvasState | null>(null);
   const [authorizationPrompt, setAuthorizationPrompt] = useState<AuthorizationPromptState | null>(null);
   const [deviceCode, setDeviceCode] = useState('');
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [installRequested, setInstallRequested] = useState(false);
   const [bubblePosition, setBubblePosition] = useState({ x: 0, y: 0 });
   const [isDraggingBubble, setIsDraggingBubble] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const terminalContainerRef = useRef<HTMLDivElement | null>(null);
+  const terminalInstanceRef = useRef<{ dispose: () => void; clear: () => void; write: (text: string) => void } | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !terminalContainerRef.current) return;
+
+    let disposed = false;
+
+    const initializeTerminal = async () => {
+      const { Terminal } = await import('xterm');
+      if (disposed || !terminalContainerRef.current) return;
+
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'monospace',
+        fontSize: 14,
+        theme: {
+          background: '#020805',
+          foreground: '#86efac',
+          cursor: '#86efac',
+          brightGreen: '#4ade80',
+          green: '#34d399',
+          red: '#f87171',
+          yellow: '#fbbf24',
+        },
+        scrollback: 200,
+      });
+
+      terminal.open(terminalContainerRef.current);
+      terminalInstanceRef.current = terminal;
+    };
+
+    void initializeTerminal();
+
+    return () => {
+      disposed = true;
+      terminalInstanceRef.current?.dispose();
+      terminalInstanceRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!terminalInstanceRef.current || !modelStatus || (modelStatus.llmReady && modelStatus.whisperReady && modelStatus.ttsReady)) return;
+
+    const terminal = terminalInstanceRef.current;
+    const lines = [
+      'Aegis local environment',
+      '======================',
+      '$ models status',
+      `llm: ${modelStatus.llmReady ? 'ready' : 'missing'}`,
+      `speech: ${modelStatus.whisperReady ? 'ready' : 'missing'}`,
+      `tts: ${modelStatus.ttsReady ? 'ready' : 'missing'}`,
+      modelStatus.message,
+      ...(modelStatus.error ? [modelStatus.error] : []),
+      '',
+      '$ install llm model?',
+      'Local models are not ready yet. Install the language model now?',
+      '',
+      modelStatus.installing ? 'Installing…' : 'Awaiting command...',
+    ];
+
+    terminal.clear();
+    terminal.write(lines.join('\r\n'));
+    terminal.write('\r\n\r\nroot@aegis:~# ');
+  }, [modelStatus]);
+
+  const getApiBaseUrl = () => {
+    if (typeof window === 'undefined') return '';
+
+    const protocol = window.location.protocol;
+    const githubMatch = window.location.host.match(/^(.*)-3000\.app\.github\.dev$/);
+
+    return githubMatch
+      ? `${protocol}//${githubMatch[1]}-8000.app.github.dev`
+      : `${protocol}//${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}`;
+  };
+
+  const sendSocketMessage = (payload: Record<string, unknown>) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(payload));
+  };
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const githubMatch = window.location.host.match(/^(.*)-3000\.app\.github\.dev$/);
-    const socketUrl = githubMatch
+    const computedSocketUrl = githubMatch
       ? `${protocol}://${githubMatch[1]}-8000.app.github.dev/ws/live`
       : `${protocol}://${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}/ws/live`;
-    const socket = new WebSocket(socketUrl);
+
+    const socket = new WebSocket(computedSocketUrl);
     socketRef.current = socket;
 
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ type: 'get_device_code' }));
+      sendSocketMessage({ type: 'get_device_code' });
+      sendSocketMessage({ type: 'get_model_status' });
     });
+
+    const statusTimer = window.setInterval(() => {
+      sendSocketMessage({ type: 'get_model_status' });
+    }, 3000);
 
     const parseSafeJson = (value: string) => {
       try {
@@ -92,6 +214,21 @@ export default function AssistantChat() {
 
         if (message.type === 'device_code' && typeof message.code === 'string') {
           setDeviceCode(message.code);
+          return;
+        }
+
+        if (message.type === 'model_status') {
+          const nextStatus: ModelStatus = {
+            llmReady: Boolean(message.llmReady),
+            whisperReady: Boolean(message.whisperReady),
+            ttsReady: Boolean(message.ttsReady),
+            installing: Boolean(message.installing),
+            progress: typeof message.progress === 'number' ? message.progress : 0,
+            message: typeof message.message === 'string' ? message.message : 'Waiting for installation.',
+            error: typeof message.error === 'string' ? message.error : null,
+          };
+          setModelStatus(nextStatus);
+          setInstallRequested(Boolean(nextStatus.installing));
           return;
         }
 
@@ -125,15 +262,17 @@ export default function AssistantChat() {
           setMessages((prev) => {
             const next = [...prev];
             const lastIndex = next.length - 1;
-            const incomingText = message.text.trim();
+            const incomingText = message.text;
+
+            if (incomingText === '') {
+              return next;
+            }
 
             if (lastIndex >= 0 && next[lastIndex].role === 'assistant' && next[lastIndex].isStreaming) {
               const previousText = next[lastIndex].content;
               next[lastIndex] = {
                 ...next[lastIndex],
-                content: previousText
-                  ? `${previousText}${previousText.endsWith(' ') || /[.!?]$/.test(previousText) ? '' : ' '}${incomingText}`
-                  : incomingText,
+                content: `${previousText}${incomingText}`,
               };
               return next;
             }
@@ -160,7 +299,6 @@ export default function AssistantChat() {
 
         if (message.type === 'skill_start') {
           setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: `Opening ${message.name}...` }]);
-          setSkillCanvas({ active: true, name: message.name, text: `Opening ${message.name}...` });
           return;
         }
 
@@ -173,36 +311,12 @@ export default function AssistantChat() {
               ? JSON.stringify((parsedOutput as { data?: Record<string, unknown> }).data ?? parsedOutput, null, 2)
               : JSON.stringify(parsedOutput, null, 2);
 
-          setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: skillText }]);
+          const htmlContent = parsedOutput && typeof parsedOutput === 'object' && typeof (parsedOutput as { html?: string }).html === 'string'
+            ? (parsedOutput as { html?: string }).html
+            : undefined;
 
-          if (parsedOutput && typeof parsedOutput === 'object' && 'data' in parsedOutput) {
-            const payload = parsedOutput as {
-              data?: Record<string, unknown>;
-              mode?: string;
-              html?: string;
-              placement?: string;
-              offsetX?: number;
-              offsetY?: number;
-            };
-            const mode = payload.mode === 'bubble' ? 'bubble' : 'fullscreen';
-            const placement = (payload.placement as SkillCanvasState['placement']) || 'center';
-            setSkillCanvas({
-              active: true,
-              name: message.name,
-              mode,
-              html: typeof payload.html === 'string' ? payload.html : undefined,
-              data: payload.data as Record<string, unknown> | null,
-              placement,
-              offsetX: typeof payload.offsetX === 'number' ? payload.offsetX : undefined,
-              offsetY: typeof payload.offsetY === 'number' ? payload.offsetY : undefined,
-            });
-          } else {
-            setSkillCanvas({
-              active: true,
-              name: message.name,
-              text: typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput, null, 2),
-            });
-          }
+          setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: skillText, html: htmlContent }]);
+          setSkillCanvas(null);
         }
       } catch {
         // Ignore malformed socket payloads.
@@ -210,6 +324,7 @@ export default function AssistantChat() {
     });
 
     return () => {
+      window.clearInterval(statusTimer);
       socket.close();
 
       if (socketRef.current === socket) {
@@ -217,6 +332,45 @@ export default function AssistantChat() {
       }
     };
   }, []);
+
+  const startModelInstallation = async () => {
+    if (installRequested) return;
+
+    setInstallRequested(true);
+    setModelStatus((prev) => prev ? {
+      ...prev,
+      installing: true,
+      message: 'Starting model installation…',
+      error: null,
+    } : prev);
+
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendSocketMessage({ type: 'install_models' });
+      return;
+    }
+
+    const apiBaseUrl = getApiBaseUrl();
+    if (!apiBaseUrl) return;
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/models/install`, { method: 'POST' });
+      const data = await response.json();
+
+      setModelStatus((prev) => prev ? {
+        ...prev,
+        installing: Boolean(data.installing || data.started),
+        message: data.message || prev.message,
+        error: data.error || null,
+      } : prev);
+    } catch {
+      setModelStatus((prev) => prev ? {
+        ...prev,
+        installing: false,
+        error: 'Failed to start model installation.',
+      } : prev);
+    }
+  };
 
   const sendPrompt = (prompt: string) => {
     const socket = socketRef.current;
@@ -306,6 +460,38 @@ export default function AssistantChat() {
 
   return (
     <div className="fixed inset-0 h-dvh overflow-hidden bg-black text-white">
+      {modelStatus && (!modelStatus.llmReady || !modelStatus.whisperReady || !modelStatus.ttsReady) && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/90 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-3xl overflow-hidden rounded-xl border border-emerald-400/25 bg-[#07110d] shadow-[0_0_70px_rgba(16,185,129,0.18)]">
+            <div className="flex items-center gap-2 border-b border-emerald-400/20 bg-[#0b140f] px-3 py-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+              <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+              <span className="ml-2 text-[10px] uppercase tracking-[0.3em] text-emerald-500/80">aegis@local:~</span>
+            </div>
+            <div className="h-[420px] bg-[#020805] p-2">
+              <div ref={terminalContainerRef} className="h-full w-full" />
+            </div>
+            <div className="flex flex-wrap gap-2 border-t border-emerald-400/20 bg-[#0b140f] px-3 py-3">
+              <button
+                type="button"
+                onClick={() => startModelInstallation()}
+                disabled={installRequested || modelStatus.installing}
+                className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-200 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {modelStatus.installing ? 'Installing…' : 'Install LLM'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelStatus((prev) => prev ? { ...prev, message: 'Skipped for now.' } : prev)}
+                className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-200 transition hover:bg-white/10"
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showCanvas && (
         <div className="absolute inset-0 z-0 overflow-hidden bg-black/90">
           {skillCanvas?.mode === 'bubble' ? (
@@ -318,7 +504,7 @@ export default function AssistantChat() {
                 <div className="flex items-start">
                   <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] shadow-none">
                     {skillCanvas.html ? (
-                      <div dangerouslySetInnerHTML={{ __html: skillCanvas.html }} />
+                      <HtmlContent html={skillCanvas.html} />
                     ) : mapUrl ? (
                       <iframe
                         src={mapUrl}
@@ -364,8 +550,7 @@ export default function AssistantChat() {
       )}
 
       <div className={`pointer-events-none absolute inset-0 z-10 flex px-3 py-3 pb-24 sm:px-6 sm:py-4 sm:pb-28 lg:px-8 ${showCanvas && skillCanvas?.mode === 'bubble' ? 'pt-20 sm:pt-40' : ''}`}>
-        {!showCanvas ? (
-          <div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="pointer-events-auto mx-auto flex h-full w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 custom-scrollbar">
             {messages.length === 0 ? (
               <div className="rounded-2xl px-3 py-2 text-sm text-slate-200 sm:px-4 sm:py-3">
                 
@@ -395,6 +580,8 @@ export default function AssistantChat() {
                         <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-300" />
                         Thinking…
                       </div>
+                    ) : message.html ? (
+                      <HtmlContent html={message.html} />
                     ) : (
                       renderMarkdownContent(message.content)
                     )}
@@ -405,7 +592,6 @@ export default function AssistantChat() {
             )}
             <div ref={messagesEndRef} />
           </div>
-        ) : null}
       </div>
 
       {authorizationPrompt && (

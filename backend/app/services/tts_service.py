@@ -3,39 +3,36 @@ import os
 import re
 import torch
 import soundfile as sf
-from kokoro import KPipeline
 
 class TTSService:
     def __init__(self):
-        print("[TTS] Initializing Kokoro-TTS engine...")
-        # Dictionary to cache language pipelines in RAM/VRAM
+        print("[TTS] Initializing Kokoro-TTS service...")
         self.pipelines = {}
-        
-        # Pre-load American English ('a') by default so the first response is instant
-        self.get_pipeline("a")
-        
-        # Directory where you can store custom cloned voice .pt files
         self.custom_voices_dir = "backend/models/voices"
         os.makedirs(self.custom_voices_dir, exist_ok=True)
-        
-        print("[TTS] Kokoro-TTS online and ready for all 54 voices & streaming!")
+        print("[TTS] Kokoro-TTS service initialized. Pipelines will load when needed.")
 
-    def get_pipeline(self, lang_code: str) -> KPipeline:
+    def _import_kokoro(self):
+        try:
+            import kokoro
+            return kokoro
+        except Exception as exc:
+            raise ImportError("Kokoro TTS package is not installed.") from exc
+
+    def get_pipeline(self, lang_code: str):
         """
-        Lazy-loads and caches phonetic pipelines for all 9 Kokoro languages:
-        'a'=US English, 'b'=UK English, 'e'=Spanish, 'f'=French, 'h'=Hindi,
-        'i'=Italian, 'j'=Japanese, 'p'=Portuguese, 'z'=Mandarin Chinese.
+        Lazy-loads and caches phonetic pipelines for all Kokoro languages.
         """
+        kokoro = self._import_kokoro()
         valid_codes = {'a', 'b', 'e', 'f', 'h', 'i', 'j', 'p', 'z'}
-        
-        # If unknown prefix (e.g., custom file without standard prefix), default to US English
+
         if lang_code not in valid_codes:
             lang_code = "a"
-            
+
         if lang_code not in self.pipelines:
             print(f"[TTS] Loading new language pipeline for prefix '{lang_code}'...")
-            self.pipelines[lang_code] = KPipeline(lang_code=lang_code)
-            
+            self.pipelines[lang_code] = kokoro.KPipeline(lang_code=lang_code)
+
         return self.pipelines[lang_code]
 
     def clean_text_for_tts(self, text: str) -> str:
