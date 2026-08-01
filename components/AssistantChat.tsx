@@ -20,7 +20,18 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  html?: string;
   isStreaming?: boolean;
+};
+
+type ModelStatus = {
+  llmReady: boolean;
+  whisperReady: boolean;
+  ttsReady: boolean;
+  installing: boolean;
+  progress: number;
+  message: string;
+  error: string | null;
 };
 
 type AuthorizationPromptState = {
@@ -40,12 +51,33 @@ function renderMarkdownContent(text: string) {
   );
 }
 
+function HtmlContent({ html }: { html: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const previousHtml = useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    if (previousHtml.current === html) return;
+    containerRef.current.innerHTML = html;
+    previousHtml.current = html;
+  }, [html]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="prose prose-invert max-w-none text-sm leading-7 text-slate-200 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:overflow-x-auto prose-pre:rounded-2xl prose-pre:border prose-pre:border-cyan-400/20 prose-pre:bg-slate-950/70 prose-pre:p-3 prose-code:rounded prose-code:bg-slate-800/80 prose-code:px-1.5 prose-code:py-0.5 prose-code:font-mono prose-code:text-cyan-300 prose-a:text-cyan-300 prose-a:no-underline hover:prose-a:underline"
+    />
+  );
+}
+
 export default function AssistantChat() {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [skillCanvas, setSkillCanvas] = useState<SkillCanvasState | null>(null);
   const [authorizationPrompt, setAuthorizationPrompt] = useState<AuthorizationPromptState | null>(null);
   const [deviceCode, setDeviceCode] = useState('');
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [installRequested, setInstallRequested] = useState(false);
   const [bubblePosition, setBubblePosition] = useState({ x: 0, y: 0 });
   const [isDraggingBubble, setIsDraggingBubble] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
@@ -60,16 +92,63 @@ export default function AssistantChat() {
     if (typeof window === 'undefined') return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const originProtocol = window.location.protocol;
     const githubMatch = window.location.host.match(/^(.*)-3000\.app\.github\.dev$/);
     const socketUrl = githubMatch
       ? `${protocol}://${githubMatch[1]}-8000.app.github.dev/ws/live`
       : `${protocol}://${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}/ws/live`;
+    const apiBaseUrl = githubMatch
+      ? `${originProtocol}://${githubMatch[1]}-8000.app.github.dev`
+      : `${originProtocol}://${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}`;
+
+    const fetchModelStatus = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/models/status`);
+        const status = await response.json();
+        setModelStatus(status);
+      } catch {
+        setModelStatus((prev) => prev ?? {
+          llmReady: false,
+          whisperReady: false,
+          ttsReady: false,
+          installing: false,
+          progress: 0,
+          message: 'Unable to reach model status endpoint.',
+          error: 'Connection failed',
+        });
+      }
+    };
+
+    const startModelInstallation = async () => {
+      if (installRequested) return;
+      setInstallRequested(true);
+
+      try {
+        const response = await fetch(`${apiBaseUrl}/models/install`, { method: 'POST' });
+        const data = await response.json();
+
+        if (data.started) {
+          setModelStatus((prev) => prev ? { ...prev, installing: true } : prev);
+          await fetchModelStatus();
+        } else {
+          setModelStatus((prev) => prev ? { ...prev, message: data.message || prev.message } : prev);
+        }
+      } catch {
+        setModelStatus((prev) => prev ? { ...prev, error: 'Failed to start model installation.' } : prev);
+      }
+    };
+
     const socket = new WebSocket(socketUrl);
     socketRef.current = socket;
 
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({ type: 'get_device_code' }));
+      void fetchModelStatus();
     });
+
+    const statusTimer = window.setInterval(() => {
+      void fetchModelStatus();
+    }, 3000);
 
     const parseSafeJson = (value: string) => {
       try {
@@ -125,15 +204,17 @@ export default function AssistantChat() {
           setMessages((prev) => {
             const next = [...prev];
             const lastIndex = next.length - 1;
-            const incomingText = message.text.trim();
+            const incomingText = message.text;
+
+            if (incomingText === '') {
+              return next;
+            }
 
             if (lastIndex >= 0 && next[lastIndex].role === 'assistant' && next[lastIndex].isStreaming) {
               const previousText = next[lastIndex].content;
               next[lastIndex] = {
                 ...next[lastIndex],
-                content: previousText
-                  ? `${previousText}${previousText.endsWith(' ') || /[.!?]$/.test(previousText) ? '' : ' '}${incomingText}`
-                  : incomingText,
+                content: `${previousText}${incomingText}`,
               };
               return next;
             }
@@ -160,7 +241,6 @@ export default function AssistantChat() {
 
         if (message.type === 'skill_start') {
           setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: `Opening ${message.name}...` }]);
-          setSkillCanvas({ active: true, name: message.name, text: `Opening ${message.name}...` });
           return;
         }
 
@@ -173,36 +253,12 @@ export default function AssistantChat() {
               ? JSON.stringify((parsedOutput as { data?: Record<string, unknown> }).data ?? parsedOutput, null, 2)
               : JSON.stringify(parsedOutput, null, 2);
 
-          setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: skillText }]);
+          const htmlContent = parsedOutput && typeof parsedOutput === 'object' && typeof (parsedOutput as { html?: string }).html === 'string'
+            ? (parsedOutput as { html?: string }).html
+            : undefined;
 
-          if (parsedOutput && typeof parsedOutput === 'object' && 'data' in parsedOutput) {
-            const payload = parsedOutput as {
-              data?: Record<string, unknown>;
-              mode?: string;
-              html?: string;
-              placement?: string;
-              offsetX?: number;
-              offsetY?: number;
-            };
-            const mode = payload.mode === 'bubble' ? 'bubble' : 'fullscreen';
-            const placement = (payload.placement as SkillCanvasState['placement']) || 'center';
-            setSkillCanvas({
-              active: true,
-              name: message.name,
-              mode,
-              html: typeof payload.html === 'string' ? payload.html : undefined,
-              data: payload.data as Record<string, unknown> | null,
-              placement,
-              offsetX: typeof payload.offsetX === 'number' ? payload.offsetX : undefined,
-              offsetY: typeof payload.offsetY === 'number' ? payload.offsetY : undefined,
-            });
-          } else {
-            setSkillCanvas({
-              active: true,
-              name: message.name,
-              text: typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput, null, 2),
-            });
-          }
+          setMessages((prev) => [...prev, { id: createMessageId(), role: 'system', content: skillText, html: htmlContent }]);
+          setSkillCanvas(null);
         }
       } catch {
         // Ignore malformed socket payloads.
@@ -210,6 +266,7 @@ export default function AssistantChat() {
     });
 
     return () => {
+      window.clearInterval(statusTimer);
       socket.close();
 
       if (socketRef.current === socket) {
@@ -306,6 +363,55 @@ export default function AssistantChat() {
 
   return (
     <div className="fixed inset-0 h-dvh overflow-hidden bg-black text-white">
+      {modelStatus && (!modelStatus.llmReady || !modelStatus.whisperReady || !modelStatus.ttsReady) && (
+        <div className="absolute inset-x-0 top-4 z-20 px-3">
+          <div className="rounded-3xl border border-cyan-400/20 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-xl backdrop-blur-md">
+            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-xs uppercase tracking-[0.28em] text-cyan-300/80">Local models needed</div>
+                <div className="mt-1 text-base font-semibold text-white">Gemma is not fully ready yet.</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2 py-1 text-[11px] font-semibold ${modelStatus.installing ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-200'}`}>
+                  {modelStatus.installing ? 'Installing' : 'Needs install'}
+                </span>
+                {!modelStatus.installing && (
+                  <button
+                    type="button"
+                    onClick={() => void startModelInstallation()}
+                    className="rounded-full bg-cyan-400/15 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-400/25"
+                  >
+                    Install models
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
+                <div className="font-semibold text-slate-100">LLM</div>
+                <div>{modelStatus.llmReady ? 'Ready' : 'Missing'}</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
+                <div className="font-semibold text-slate-100">Speech</div>
+                <div>{modelStatus.whisperReady ? 'Ready' : 'Missing'}</div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
+                <div className="font-semibold text-slate-100">TTS</div>
+                <div>{modelStatus.ttsReady ? 'Ready' : 'Missing'}</div>
+              </div>
+            </div>
+
+            <div className="mt-3 space-y-2 text-xs text-slate-300">
+              <div>{modelStatus.message}</div>
+              {modelStatus.error && <div className="rounded-2xl border border-red-400/20 bg-red-500/10 p-2 text-red-200">{modelStatus.error}</div>}
+              <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                <div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${Math.min(100, Math.max(0, modelStatus.progress * 100))}%` }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {showCanvas && (
         <div className="absolute inset-0 z-0 overflow-hidden bg-black/90">
           {skillCanvas?.mode === 'bubble' ? (
@@ -318,7 +424,7 @@ export default function AssistantChat() {
                 <div className="flex items-start">
                   <div className="flex-1 min-w-0 overflow-hidden rounded-[24px] shadow-none">
                     {skillCanvas.html ? (
-                      <div dangerouslySetInnerHTML={{ __html: skillCanvas.html }} />
+                      <HtmlContent html={skillCanvas.html} />
                     ) : mapUrl ? (
                       <iframe
                         src={mapUrl}
@@ -364,8 +470,7 @@ export default function AssistantChat() {
       )}
 
       <div className={`pointer-events-none absolute inset-0 z-10 flex px-3 py-3 pb-24 sm:px-6 sm:py-4 sm:pb-28 lg:px-8 ${showCanvas && skillCanvas?.mode === 'bubble' ? 'pt-20 sm:pt-40' : ''}`}>
-        {!showCanvas ? (
-          <div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="pointer-events-auto mx-auto flex h-full w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 custom-scrollbar">
             {messages.length === 0 ? (
               <div className="rounded-2xl px-3 py-2 text-sm text-slate-200 sm:px-4 sm:py-3">
                 
@@ -395,6 +500,8 @@ export default function AssistantChat() {
                         <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-300" />
                         Thinking…
                       </div>
+                    ) : message.html ? (
+                      <HtmlContent html={message.html} />
                     ) : (
                       renderMarkdownContent(message.content)
                     )}
@@ -405,7 +512,6 @@ export default function AssistantChat() {
             )}
             <div ref={messagesEndRef} />
           </div>
-        ) : null}
       </div>
 
       {authorizationPrompt && (

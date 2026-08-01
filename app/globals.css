@@ -24,3 +24,27 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56,189,248,0.7) rgba(15,23,42,0.9);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15,23,42,0.9);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(56,189,248,0.7);
+  border-radius: 9999px;
+  border: 2px solid rgba(15,23,42,0.9);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(56,189,248,0.9);
+}

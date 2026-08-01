@@ -1,6 +1,7 @@
-import os
+import threading
 import urllib.request
 from pathlib import Path
+from typing import Callable, Optional
 from tqdm import tqdm
 from faster_whisper import download_model
 
@@ -15,65 +16,130 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 WHISPER_DIR.mkdir(parents=True, exist_ok=True)
 LLM_DIR.mkdir(parents=True, exist_ok=True)
 
+INSTALL_STATE = {
+    "in_progress": False,
+    "progress": 0.0,
+    "message": "Waiting for installation.",
+    "error": None,
+}
+INSTALL_LOCK = threading.Lock()
+
 class DownloadProgressBar(tqdm):
     """Provides a CLI progress bar for raw HTTP file downloads."""
+
     def update_to(self, b=1, bsize=1, tsize=None):
         if tsize is not None:
             self.total = tsize
         self.update(b * bsize - self.n)
 
-def download_file_with_progress(url: str, output_path: Path, model_name: str):
-    """Downloads a file over HTTP while rendering a real-time progress bar."""
+
+def _set_install_state(
+    *,
+    in_progress: Optional[bool] = None,
+    progress: Optional[float] = None,
+    message: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    with INSTALL_LOCK:
+        if in_progress is not None:
+            INSTALL_STATE["in_progress"] = in_progress
+        if progress is not None:
+            INSTALL_STATE["progress"] = float(progress)
+        if message is not None:
+            INSTALL_STATE["message"] = message
+        if error is not None:
+            INSTALL_STATE["error"] = error
+
+
+def download_file_with_progress(
+    url: str,
+    output_path: Path,
+    model_name: str,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    """Downloads a file over HTTP with optional progress callbacks."""
     print(f"\n📥 [Model Manager] Downloading {model_name}...")
     print(f"🔗 Source URL: {url}")
     print(f"📂 Saving to: {output_path}")
-    
-    with DownloadProgressBar(unit='B', unit_scale=True, miniters=1, desc=model_name) as t:
-        urllib.request.urlretrieve(url, filename=output_path, reporthook=t.update_to)
+
+    def reporthook(block_num: int, block_size: int, total_size: int) -> None:
+        if progress_callback and total_size:
+            progress_callback(block_num * block_size, total_size)
+
+    urllib.request.urlretrieve(url, filename=output_path, reporthook=reporthook)
     print(f"✅ [Model Manager] Successfully installed {model_name}!\n")
 
-def ensure_models_ready():
-    """Verifies all AI models exist locally; downloads them immediately if missing."""
-    print("🔍 [Model Manager] Running pre-flight checks for offline AI models...")
 
-    # 1. Faster-Whisper Speech Recognition Model
-    print("⚡ [1/3] Checking Faster-Whisper (base.en)...")
+def is_whisper_ready() -> bool:
+    return (WHISPER_DIR / "base.en").exists()
+
+
+def is_llm_ready() -> bool:
+    return (LLM_DIR / "gemma-4-E2B-it.litertlm").exists()
+
+
+def is_tts_ready() -> bool:
     try:
-        download_model("base.en", output_dir=str(WHISPER_DIR))
-        print("✅ Faster-Whisper weights verified.")
-    except Exception as e:
-        print(f"❌ Failed to verify Faster-Whisper: {e}")
+        import kokoro  # noqa: F401
+        return True
+    except Exception:
+        return False
 
-    # 2. Kokoro-TTS Voice Synthesis Model
-    print("🗣️ [2/3] Checking Kokoro-TTS voice pack...")
+
+def get_models_status() -> dict:
+    with INSTALL_LOCK:
+        return {
+            "llmReady": is_llm_ready(),
+            "whisperReady": is_whisper_ready(),
+            "ttsReady": is_tts_ready(),
+            "installing": INSTALL_STATE["in_progress"],
+            "progress": INSTALL_STATE["progress"],
+            "message": INSTALL_STATE["message"],
+            "error": INSTALL_STATE["error"],
+        }
+
+
+def install_missing_models() -> None:
+    if INSTALL_STATE["in_progress"]:
+        return
+
+    _set_install_state(in_progress=True, progress=0.0, message="Preparing local model installation...", error=None)
+
     try:
-        from kokoro import KPipeline
-        # Initializing the pipeline triggers automatic caching of the default voices
-        _ = KPipeline(lang_code="a")
-        print("✅ Kokoro-TTS weights verified.")
-    except Exception as e:
-        print(f"❌ Failed to verify Kokoro-TTS: {e}")
+        if not is_whisper_ready():
+            _set_install_state(progress=0.1, message="Downloading Faster-Whisper speech model...")
+            download_model("base.en", output_dir=str(WHISPER_DIR))
+            _set_install_state(progress=0.3, message="Faster-Whisper installed.")
 
-    # 3. Gemma LiteRT Language Model
-    print("🧠 [3/3] Checking Gemma LLM weights...")
-    llm_filename = "gemma-4-E2B-it.litertlm"
-    llm_path = LLM_DIR / llm_filename
-    
-    # Official mirror URL for converted LiteRT models
-    llm_url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+        if not is_llm_ready():
+            llm_url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+            llm_path = LLM_DIR / "gemma-4-E2B-it.litertlm"
 
-    if not llm_path.exists():
-        print(f"⚠️ LLM file not found at {llm_path}. Starting automatic download...")
-        try:
-            download_file_with_progress(llm_url, llm_path, "Gemma 2B LiteRT")
-        except Exception as e:
-            print(f"❌ Could not download LLM from {llm_url}: {e}")
-            print("💡 TIP: You can manually drop any valid .litertlm file into backend/models/llm/")
+            def llm_progress(downloaded: int, total: int) -> None:
+                if total:
+                    chunk_progress = min(1.0, max(0.0, downloaded / total))
+                    _set_install_state(progress=0.3 + chunk_progress * 0.6, message=f"Downloading Gemma LLM... {int(chunk_progress * 100)}%")
+
+            download_file_with_progress(llm_url, llm_path, "Gemma LiteRT", progress_callback=llm_progress)
+            _set_install_state(progress=0.9, message="Gemma LLM installed.")
+
+        if not is_tts_ready():
+            _set_install_state(progress=0.95, message="Verifying Kokoro TTS package...")
+            import kokoro  # noqa: F401
+            _set_install_state(progress=1.0, message="Kokoro TTS package available.")
+        else:
+            _set_install_state(progress=1.0, message="Local AI models are ready.")
+
+    except Exception as exc:
+        _set_install_state(in_progress=False, progress=1.0, message="Installation failed.", error=str(exc))
+        raise
     else:
-        file_size_mb = llm_path.stat().st_size / (1024 * 1024)
-        print(f"✅ Gemma LLM verified ({file_size_mb:.1f} MB).")
+        _set_install_state(in_progress=False, progress=1.0, message="Local AI models are ready.")
 
-    print("🟢 [Model Manager] All AI engines verified and ready for offline inference!\n")
+
+def ensure_models_ready() -> None:
+    install_missing_models()
+
 
 if __name__ == "__main__":
     ensure_models_ready()
