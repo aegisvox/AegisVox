@@ -184,6 +184,28 @@ async def websocket_live_endpoint(websocket: WebSocket):
                         })
                         continue
 
+                    elif payload.get("type") == "get_model_status":
+                        await websocket.send_json({
+                            "type": "model_status",
+                            **get_models_status(),
+                        })
+                        continue
+
+                    elif payload.get("type") == "install_models":
+                        if get_models_status().get("installing"):
+                            await websocket.send_json({
+                                "type": "model_status",
+                                **get_models_status(),
+                            })
+                            continue
+
+                        threading.Thread(target=install_missing_models, daemon=True).start()
+                        await websocket.send_json({
+                            "type": "model_status",
+                            **get_models_status(),
+                        })
+                        continue
+
                     elif payload.get("type") == "grant_permission":
                         skill_name = payload.get("skill")
                         permission = payload.get("permission")

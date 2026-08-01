@@ -27,14 +27,20 @@ class LLMService:
             print(f"❌ [LLM] Failed to initialize LiteRT engine: {e}")
             self.ready = False
 
+    def ensure_ready(self) -> bool:
+        if self.ready:
+            return True
+        self._load_engine()
+        return self.ready
+
     def reload_engine(self) -> None:
         self._load_engine()
 
     def generate_response(self, user_prompt: str) -> str:
         """Generates a conversational response from the locally loaded Gemma model."""
-        if not self.ready:
+        if not self.ensure_ready():
             return (
-                "I heard: '{user_prompt}', but the local LLM model is not installed yet. "
+                f"I heard: '{user_prompt}', but the local LLM model is not installed yet. "
                 "Please install the local models from the UI."
             )
 
@@ -45,9 +51,9 @@ class LLMService:
 
     def stream_response(self, user_prompt: str):
         """Yields streaming text chunks from the locally loaded Gemma model."""
-        if not self.ready:
+        if not self.ensure_ready():
             yield (
-                "I heard: '{user_prompt}', but the local LLM model is not installed yet. "
+                f"I heard: '{user_prompt}', but the local LLM model is not installed yet. "
                 "Please install the local models from the UI."
             )
             return

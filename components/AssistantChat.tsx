@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import 'xterm/css/xterm.css';
 
 type SkillCanvasState = {
   active: boolean;
@@ -83,71 +84,113 @@ export default function AssistantChat() {
   const socketRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const terminalContainerRef = useRef<HTMLDivElement | null>(null);
+  const terminalInstanceRef = useRef<{ dispose: () => void; clear: () => void; write: (text: string) => void } | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !terminalContainerRef.current) return;
+
+    let disposed = false;
+
+    const initializeTerminal = async () => {
+      const { Terminal } = await import('xterm');
+      if (disposed || !terminalContainerRef.current) return;
+
+      const terminal = new Terminal({
+        cursorBlink: true,
+        convertEol: true,
+        fontFamily: 'monospace',
+        fontSize: 14,
+        theme: {
+          background: '#020805',
+          foreground: '#86efac',
+          cursor: '#86efac',
+          brightGreen: '#4ade80',
+          green: '#34d399',
+          red: '#f87171',
+          yellow: '#fbbf24',
+        },
+        scrollback: 200,
+      });
+
+      terminal.open(terminalContainerRef.current);
+      terminalInstanceRef.current = terminal;
+    };
+
+    void initializeTerminal();
+
+    return () => {
+      disposed = true;
+      terminalInstanceRef.current?.dispose();
+      terminalInstanceRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!terminalInstanceRef.current || !modelStatus || (modelStatus.llmReady && modelStatus.whisperReady && modelStatus.ttsReady)) return;
+
+    const terminal = terminalInstanceRef.current;
+    const lines = [
+      'Aegis local environment',
+      '======================',
+      '$ models status',
+      `llm: ${modelStatus.llmReady ? 'ready' : 'missing'}`,
+      `speech: ${modelStatus.whisperReady ? 'ready' : 'missing'}`,
+      `tts: ${modelStatus.ttsReady ? 'ready' : 'missing'}`,
+      modelStatus.message,
+      ...(modelStatus.error ? [modelStatus.error] : []),
+      '',
+      '$ install llm model?',
+      'Local models are not ready yet. Install the language model now?',
+      '',
+      modelStatus.installing ? 'Installing…' : 'Awaiting command...',
+    ];
+
+    terminal.clear();
+    terminal.write(lines.join('\r\n'));
+    terminal.write('\r\n\r\nroot@aegis:~# ');
+  }, [modelStatus]);
+
+  const getApiBaseUrl = () => {
+    if (typeof window === 'undefined') return '';
+
+    const protocol = window.location.protocol;
+    const githubMatch = window.location.host.match(/^(.*)-3000\.app\.github\.dev$/);
+
+    return githubMatch
+      ? `${protocol}//${githubMatch[1]}-8000.app.github.dev`
+      : `${protocol}//${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}`;
+  };
+
+  const sendSocketMessage = (payload: Record<string, unknown>) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(payload));
+  };
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const originProtocol = window.location.protocol;
     const githubMatch = window.location.host.match(/^(.*)-3000\.app\.github\.dev$/);
-    const socketUrl = githubMatch
+    const computedSocketUrl = githubMatch
       ? `${protocol}://${githubMatch[1]}-8000.app.github.dev/ws/live`
       : `${protocol}://${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}/ws/live`;
-    const apiBaseUrl = githubMatch
-      ? `${originProtocol}://${githubMatch[1]}-8000.app.github.dev`
-      : `${originProtocol}://${window.location.hostname}:${window.location.port === '3000' ? '8000' : window.location.port || '8000'}`;
 
-    const fetchModelStatus = async () => {
-      try {
-        const response = await fetch(`${apiBaseUrl}/models/status`);
-        const status = await response.json();
-        setModelStatus(status);
-      } catch {
-        setModelStatus((prev) => prev ?? {
-          llmReady: false,
-          whisperReady: false,
-          ttsReady: false,
-          installing: false,
-          progress: 0,
-          message: 'Unable to reach model status endpoint.',
-          error: 'Connection failed',
-        });
-      }
-    };
-
-    const startModelInstallation = async () => {
-      if (installRequested) return;
-      setInstallRequested(true);
-
-      try {
-        const response = await fetch(`${apiBaseUrl}/models/install`, { method: 'POST' });
-        const data = await response.json();
-
-        if (data.started) {
-          setModelStatus((prev) => prev ? { ...prev, installing: true } : prev);
-          await fetchModelStatus();
-        } else {
-          setModelStatus((prev) => prev ? { ...prev, message: data.message || prev.message } : prev);
-        }
-      } catch {
-        setModelStatus((prev) => prev ? { ...prev, error: 'Failed to start model installation.' } : prev);
-      }
-    };
-
-    const socket = new WebSocket(socketUrl);
+    const socket = new WebSocket(computedSocketUrl);
     socketRef.current = socket;
 
     socket.addEventListener('open', () => {
-      socket.send(JSON.stringify({ type: 'get_device_code' }));
-      void fetchModelStatus();
+      sendSocketMessage({ type: 'get_device_code' });
+      sendSocketMessage({ type: 'get_model_status' });
     });
 
     const statusTimer = window.setInterval(() => {
-      void fetchModelStatus();
+      sendSocketMessage({ type: 'get_model_status' });
     }, 3000);
 
     const parseSafeJson = (value: string) => {
@@ -171,6 +214,21 @@ export default function AssistantChat() {
 
         if (message.type === 'device_code' && typeof message.code === 'string') {
           setDeviceCode(message.code);
+          return;
+        }
+
+        if (message.type === 'model_status') {
+          const nextStatus: ModelStatus = {
+            llmReady: Boolean(message.llmReady),
+            whisperReady: Boolean(message.whisperReady),
+            ttsReady: Boolean(message.ttsReady),
+            installing: Boolean(message.installing),
+            progress: typeof message.progress === 'number' ? message.progress : 0,
+            message: typeof message.message === 'string' ? message.message : 'Waiting for installation.',
+            error: typeof message.error === 'string' ? message.error : null,
+          };
+          setModelStatus(nextStatus);
+          setInstallRequested(Boolean(nextStatus.installing));
           return;
         }
 
@@ -275,6 +333,45 @@ export default function AssistantChat() {
     };
   }, []);
 
+  const startModelInstallation = async () => {
+    if (installRequested) return;
+
+    setInstallRequested(true);
+    setModelStatus((prev) => prev ? {
+      ...prev,
+      installing: true,
+      message: 'Starting model installation…',
+      error: null,
+    } : prev);
+
+    const socket = socketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendSocketMessage({ type: 'install_models' });
+      return;
+    }
+
+    const apiBaseUrl = getApiBaseUrl();
+    if (!apiBaseUrl) return;
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/models/install`, { method: 'POST' });
+      const data = await response.json();
+
+      setModelStatus((prev) => prev ? {
+        ...prev,
+        installing: Boolean(data.installing || data.started),
+        message: data.message || prev.message,
+        error: data.error || null,
+      } : prev);
+    } catch {
+      setModelStatus((prev) => prev ? {
+        ...prev,
+        installing: false,
+        error: 'Failed to start model installation.',
+      } : prev);
+    }
+  };
+
   const sendPrompt = (prompt: string) => {
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -364,50 +461,33 @@ export default function AssistantChat() {
   return (
     <div className="fixed inset-0 h-dvh overflow-hidden bg-black text-white">
       {modelStatus && (!modelStatus.llmReady || !modelStatus.whisperReady || !modelStatus.ttsReady) && (
-        <div className="absolute inset-x-0 top-4 z-20 px-3">
-          <div className="rounded-3xl border border-cyan-400/20 bg-slate-950/95 p-4 text-sm text-slate-100 shadow-xl backdrop-blur-md">
-            <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-[0.28em] text-cyan-300/80">Local models needed</div>
-                <div className="mt-1 text-base font-semibold text-white">Gemma is not fully ready yet.</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`rounded-full px-2 py-1 text-[11px] font-semibold ${modelStatus.installing ? 'bg-emerald-400/10 text-emerald-200' : 'bg-amber-400/10 text-amber-200'}`}>
-                  {modelStatus.installing ? 'Installing' : 'Needs install'}
-                </span>
-                {!modelStatus.installing && (
-                  <button
-                    type="button"
-                    onClick={() => void startModelInstallation()}
-                    className="rounded-full bg-cyan-400/15 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-400/25"
-                  >
-                    Install models
-                  </button>
-                )}
-              </div>
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/90 px-4 py-6 backdrop-blur-sm">
+          <div className="w-full max-w-3xl overflow-hidden rounded-xl border border-emerald-400/25 bg-[#07110d] shadow-[0_0_70px_rgba(16,185,129,0.18)]">
+            <div className="flex items-center gap-2 border-b border-emerald-400/20 bg-[#0b140f] px-3 py-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+              <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+              <span className="ml-2 text-[10px] uppercase tracking-[0.3em] text-emerald-500/80">aegis@local:~</span>
             </div>
-
-            <div className="grid gap-2 sm:grid-cols-3">
-              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
-                <div className="font-semibold text-slate-100">LLM</div>
-                <div>{modelStatus.llmReady ? 'Ready' : 'Missing'}</div>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
-                <div className="font-semibold text-slate-100">Speech</div>
-                <div>{modelStatus.whisperReady ? 'Ready' : 'Missing'}</div>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-3 text-xs text-slate-300">
-                <div className="font-semibold text-slate-100">TTS</div>
-                <div>{modelStatus.ttsReady ? 'Ready' : 'Missing'}</div>
-              </div>
+            <div className="h-[420px] bg-[#020805] p-2">
+              <div ref={terminalContainerRef} className="h-full w-full" />
             </div>
-
-            <div className="mt-3 space-y-2 text-xs text-slate-300">
-              <div>{modelStatus.message}</div>
-              {modelStatus.error && <div className="rounded-2xl border border-red-400/20 bg-red-500/10 p-2 text-red-200">{modelStatus.error}</div>}
-              <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                <div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${Math.min(100, Math.max(0, modelStatus.progress * 100))}%` }} />
-              </div>
+            <div className="flex flex-wrap gap-2 border-t border-emerald-400/20 bg-[#0b140f] px-3 py-3">
+              <button
+                type="button"
+                onClick={() => startModelInstallation()}
+                disabled={installRequested || modelStatus.installing}
+                className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-200 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {modelStatus.installing ? 'Installing…' : 'Install LLM'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelStatus((prev) => prev ? { ...prev, message: 'Skipped for now.' } : prev)}
+                className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-200 transition hover:bg-white/10"
+              >
+                Skip
+              </button>
             </div>
           </div>
         </div>

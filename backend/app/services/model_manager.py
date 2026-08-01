@@ -103,14 +103,9 @@ def install_missing_models() -> None:
     if INSTALL_STATE["in_progress"]:
         return
 
-    _set_install_state(in_progress=True, progress=0.0, message="Preparing local model installation...", error=None)
+    _set_install_state(in_progress=True, progress=0.0, message="Preparing Gemma installation...", error=None)
 
     try:
-        if not is_whisper_ready():
-            _set_install_state(progress=0.1, message="Downloading Faster-Whisper speech model...")
-            download_model("base.en", output_dir=str(WHISPER_DIR))
-            _set_install_state(progress=0.3, message="Faster-Whisper installed.")
-
         if not is_llm_ready():
             llm_url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
             llm_path = LLM_DIR / "gemma-4-E2B-it.litertlm"
@@ -118,23 +113,18 @@ def install_missing_models() -> None:
             def llm_progress(downloaded: int, total: int) -> None:
                 if total:
                     chunk_progress = min(1.0, max(0.0, downloaded / total))
-                    _set_install_state(progress=0.3 + chunk_progress * 0.6, message=f"Downloading Gemma LLM... {int(chunk_progress * 100)}%")
+                    _set_install_state(progress=chunk_progress, message=f"Downloading Gemma LLM... {int(chunk_progress * 100)}%")
 
             download_file_with_progress(llm_url, llm_path, "Gemma LiteRT", progress_callback=llm_progress)
-            _set_install_state(progress=0.9, message="Gemma LLM installed.")
-
-        if not is_tts_ready():
-            _set_install_state(progress=0.95, message="Verifying Kokoro TTS package...")
-            import kokoro  # noqa: F401
-            _set_install_state(progress=1.0, message="Kokoro TTS package available.")
+            _set_install_state(progress=1.0, message="Gemma LLM installed.")
         else:
-            _set_install_state(progress=1.0, message="Local AI models are ready.")
+            _set_install_state(progress=1.0, message="Gemma LLM already installed.")
 
     except Exception as exc:
-        _set_install_state(in_progress=False, progress=1.0, message="Installation failed.", error=str(exc))
+        _set_install_state(in_progress=False, progress=1.0, message="Gemma installation failed.", error=str(exc))
         raise
     else:
-        _set_install_state(in_progress=False, progress=1.0, message="Local AI models are ready.")
+        _set_install_state(in_progress=False, progress=1.0, message="Gemma installation complete.")
 
 
 def ensure_models_ready() -> None:
