@@ -1,0 +1,13 @@
+{
+  "name": "system_info",
+  "description": "Retrieve real-time CPU, RAM, disk, and OS information.",
+  "script": "index.py",
+  "inputs": {
+    "target": {
+      "type": "string",
+      "required": false,
+      "description": "One of: all, cpu, memory, disk"
+    }
+  },
+  "category": "system"
+}

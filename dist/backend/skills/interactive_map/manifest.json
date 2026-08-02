@@ -1,0 +1,14 @@
+{
+  "name": "interactive-map",
+  "description": "Show an interactive map view for the given location.",
+  "script": "index.py",
+  "permissions": ["app.display.showDataOnCanvas","app.chat.sendMessages"],
+  "inputs": {
+    "location": {
+      "type": "string",
+      "required": true,
+      "description": "The location to show on the map"
+    }
+  },
+  "category": "utility"
+}

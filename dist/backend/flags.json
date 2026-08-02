@@ -1,0 +1,21 @@
+{
+    "flags.user.adminOnly":{
+        "onlyForAdmin": true,
+        "description": "This flag makes a skill or a feature only available to admin users",
+        "authorizationRequired": false,
+        "declineMessage": "This feature/skill is only available to admin users.",
+        "custom_data": {}
+        },
+    "flags.user.<user_id>":{
+        "onlyForUser": true,
+        "description": "This flag makes a skill or a feature only available to a specific user",
+        "authorizationRequired": false,
+        "declineMessage": "This feature/skill is only available to a specific user.",
+        "custom_data": {
+            "<user_id>": {
+                "description": "The user ID of the user who can access this feature/skill.",
+                "dataType": "number"
+            }
+        }
+    }
+}
