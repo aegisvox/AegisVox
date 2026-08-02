@@ -1,0 +1,15 @@
+node_modules
+npm-debug.log
+.next
+.git
+.gitignore
+Dockerfile*
+.dockerignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.env
+.env.local
+.vscode
+tests
