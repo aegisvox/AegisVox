@@ -1,0 +1,9 @@
+.venv
+app
+backend
+components
+node_modules
+tests
+.aegisvox
+AGENTS.md
+CLAUDE.md
