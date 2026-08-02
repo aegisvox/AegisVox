@@ -8,6 +8,11 @@ on:
       - 'v*'
       - 'alpha-*'
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to publish when running manually'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -41,18 +46,31 @@ jobs:
       - name: Build image tags
         id: build-tags
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          if [[ -n "${INPUT_TAG_NAME}" ]]; then
+            tagname="${INPUT_TAG_NAME}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             tagname="${GITHUB_REF#refs/tags/}"
-            tags=$'ghcr.io/aegisvox/aegisvox:${tagname}\ndocker.io/aegisvox/aegisvox:${tagname}\nghcr.io/aegisvox/aegisvox:${GITHUB_SHA}\ndocker.io/aegisvox/aegisvox:${GITHUB_SHA}'
           else
-            tags=$'ghcr.io/aegisvox/aegisvox:latest\ndocker.io/aegisvox/aegisvox:latest\nghcr.io/aegisvox/aegisvox:${GITHUB_SHA}\ndocker.io/aegisvox/aegisvox:${GITHUB_SHA}'
+            tagname="latest"
           fi
+
+          tags=(
+            "ghcr.io/aegisvox/aegisvox:${tagname}"
+            "docker.io/aegisvox/aegisvox:${tagname}"
+          )
+
+          if [[ "${tagname}" != "latest" ]]; then
+            tags+=("ghcr.io/aegisvox/aegisvox:${GITHUB_SHA}")
+            tags+=("docker.io/aegisvox/aegisvox:${GITHUB_SHA}")
+          fi
+
           echo "tags<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$tags" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${tags[@]}" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REF: ${{ github.ref }}
+          INPUT_TAG_NAME: ${{ github.event.inputs.tag_name }}
 
       - name: Build and push Docker images
         uses: docker/build-push-action@v5
