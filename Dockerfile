@@ -1,35 +1,28 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-slim AS builder
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm install
-
-COPY . .
-RUN npm run build
-
-FROM node:20-slim AS runner
+FROM node:20-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip libsndfile1 ffmpeg \
+        python3 python3-pip python3-venv libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/next.config.ts ./next.config.ts
-COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY --from=builder /app/app ./app
-COPY --from=builder /app/components ./components
-COPY --from=builder /app/dist ./dist
+COPY package*.json ./
+RUN npm install --production && npm install --production typescript
 
-RUN python3 -m pip install --no-cache-dir -r dist/backend/requirements.txt
+COPY .next .next
+COPY public public
+COPY next.config.ts ./next.config.ts
+COPY dist dist
 
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --upgrade pip setuptools wheel \
+    && /opt/venv/bin/pip install --no-cache-dir -r dist/backend/requirements.txt
+
+ENV NODE_ENV=production
 ENV PORT=3000
 ENV PYTHONPATH=/app/dist
+ENV PATH=/opt/venv/bin:$PATH
 EXPOSE 3000 8000
 
 CMD ["bash", "-lc", "npm run start & exec python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000"]
