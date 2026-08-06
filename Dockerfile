@@ -10,9 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release software-properties-common \
         build-essential git unzip zip \
-        python3.12 python3.12-venv python3.12-distutils python3.12-dev \
+        python3.12 python3.12-venv python3.12-dev \
         libsndfile1 ffmpeg \
-        libvulkan1 vulkan-utils libvulkan-dev \
+        libvulkan1 vulkan-tools libvulkan-dev mesa-vulkan-drivers \
         docker.io \
     && rm -rf /var/lib/apt/lists/*
 
