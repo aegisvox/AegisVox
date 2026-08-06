@@ -3,7 +3,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import 'xterm/css/xterm.css';
 
 type SkillCanvasState = {
   active: boolean;
@@ -84,76 +83,11 @@ export default function AssistantChat() {
   const socketRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
-  const terminalContainerRef = useRef<HTMLDivElement | null>(null);
-  const terminalInstanceRef = useRef<{ dispose: () => void; clear: () => void; write: (text: string) => void } | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || !terminalContainerRef.current) return;
-
-    let disposed = false;
-
-    const initializeTerminal = async () => {
-      const { Terminal } = await import('xterm');
-      if (disposed || !terminalContainerRef.current) return;
-
-      const terminal = new Terminal({
-        cursorBlink: true,
-        convertEol: true,
-        fontFamily: 'monospace',
-        fontSize: 14,
-        theme: {
-          background: '#020805',
-          foreground: '#86efac',
-          cursor: '#86efac',
-          brightGreen: '#4ade80',
-          green: '#34d399',
-          red: '#f87171',
-          yellow: '#fbbf24',
-        },
-        scrollback: 200,
-      });
-
-      terminal.open(terminalContainerRef.current);
-      terminalInstanceRef.current = terminal;
-    };
-
-    void initializeTerminal();
-
-    return () => {
-      disposed = true;
-      terminalInstanceRef.current?.dispose();
-      terminalInstanceRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!terminalInstanceRef.current || !modelStatus || (modelStatus.llmReady && modelStatus.whisperReady && modelStatus.ttsReady)) return;
-
-    const terminal = terminalInstanceRef.current;
-    const lines = [
-      'Aegis local environment',
-      '======================',
-      '$ models status',
-      `llm: ${modelStatus.llmReady ? 'ready' : 'missing'}`,
-      `speech: ${modelStatus.whisperReady ? 'ready' : 'missing'}`,
-      `tts: ${modelStatus.ttsReady ? 'ready' : 'missing'}`,
-      modelStatus.message,
-      ...(modelStatus.error ? [modelStatus.error] : []),
-      '',
-      '$ install llm model?',
-      'Local models are not ready yet. Install the language model now?',
-      '',
-      modelStatus.installing ? 'Installing…' : 'Awaiting command...',
-    ];
-
-    terminal.clear();
-    terminal.write(lines.join('\r\n'));
-    terminal.write('\r\n\r\nroot@aegis:~# ');
-  }, [modelStatus]);
 
   const getApiBaseUrl = () => {
     if (typeof window === 'undefined') return '';
@@ -458,40 +392,10 @@ export default function AssistantChat() {
     setIsDraggingBubble(false);
   };
 
+  const isLlmMissing = modelStatus ? !modelStatus.llmReady : false;
+
   return (
     <div className="fixed inset-0 h-dvh overflow-hidden bg-black text-white">
-      {modelStatus && (!modelStatus.llmReady || !modelStatus.whisperReady || !modelStatus.ttsReady) && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/90 px-4 py-6 backdrop-blur-sm">
-          <div className="w-full max-w-3xl overflow-hidden rounded-xl border border-emerald-400/25 bg-[#07110d] shadow-[0_0_70px_rgba(16,185,129,0.18)]">
-            <div className="flex items-center gap-2 border-b border-emerald-400/20 bg-[#0b140f] px-3 py-2">
-              <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
-              <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
-              <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-              <span className="ml-2 text-[10px] uppercase tracking-[0.3em] text-emerald-500/80">aegis@local:~</span>
-            </div>
-            <div className="h-[420px] bg-[#020805] p-2">
-              <div ref={terminalContainerRef} className="h-full w-full" />
-            </div>
-            <div className="flex flex-wrap gap-2 border-t border-emerald-400/20 bg-[#0b140f] px-3 py-3">
-              <button
-                type="button"
-                onClick={() => startModelInstallation()}
-                disabled={installRequested || modelStatus.installing}
-                className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-emerald-200 transition hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {modelStatus.installing ? 'Installing…' : 'Install LLM'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setModelStatus((prev) => prev ? { ...prev, message: 'Skipped for now.' } : prev)}
-                className="rounded-md border border-white/10 bg-white/5 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-200 transition hover:bg-white/10"
-              >
-                Skip
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {showCanvas && (
         <div className="absolute inset-0 z-0 overflow-hidden bg-black/90">
           {skillCanvas?.mode === 'bubble' ? (
@@ -625,14 +529,55 @@ export default function AssistantChat() {
           <div className="absolute inset-x-0 -top-[1px] h-[calc(100%+3px)] rounded-full bg-cyan-400/20 blur-3xl" />
           <div className="absolute inset-x-0 -top-[1px] h-[calc(100%+3px)] rounded-full bg-blue-500/15 blur-3xl" />
           <div className="relative mx-auto w-full max-w-5xl">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask anything..."
-              className="w-full rounded-full border border-cyan-400/20 bg-[#111217] px-4 py-3 text-sm text-white transition placeholder-slate-500 focus:outline-none focus:border-transparent focus:ring-0 sm:px-6 sm:py-4"
-            />
+            {isLlmMissing ? (
+              <div className="rounded-full border border-cyan-400/20 bg-[#111217] px-4 py-3 text-sm text-slate-300 transition sm:px-6 sm:py-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="font-semibold text-white">Gemma LLM is required</div>
+                    <div className="text-xs text-slate-400">Install the local model to enable the chat input.</div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startModelInstallation()}
+                      disabled={installRequested || modelStatus?.installing}
+                      className="rounded-full bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {modelStatus?.installing ? 'Installing…' : 'Install Gemma LLM'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setModelStatus((prev) => prev ? { ...prev, message: 'Installation deferred.' } : prev)}
+                      className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+                    >
+                      Defer
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-3 rounded-3xl border border-slate-800/70 bg-slate-900/80 p-3 text-sm text-slate-200">
+                  <div className="mb-2 text-xs uppercase tracking-[0.24em] text-slate-500">Installation progress</div>
+                  <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className="h-full rounded-full bg-cyan-400 transition-all duration-300"
+                      style={{ width: `${Math.round((modelStatus?.progress ?? 0) * 100)}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-[11px] uppercase tracking-[0.2em] text-slate-500">
+                    <span>{modelStatus?.message}</span>
+                    <span>{Math.round((modelStatus?.progress ?? 0) * 100)}%</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask anything..."
+                className="w-full rounded-full border border-cyan-400/20 bg-[#111217] px-4 py-3 text-sm text-white transition placeholder-slate-500 focus:outline-none focus:border-transparent focus:ring-0 sm:px-6 sm:py-4"
+              />
+            )}
           </div>
         </div>
       </div>
