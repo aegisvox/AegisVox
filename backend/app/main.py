@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -199,7 +200,37 @@ async def websocket_live_endpoint(websocket: WebSocket):
                             })
                             continue
 
-                        threading.Thread(target=install_missing_models, daemon=True).start()
+                        loop = asyncio.get_running_loop()
+
+                        def status_callback() -> None:
+                            asyncio.run_coroutine_threadsafe(
+                                websocket.send_json({
+                                    "type": "model_status",
+                                    **get_models_status(),
+                                }), loop
+                            )
+
+                        def post_install_callback() -> None:
+                            try:
+                                llm.reload_engine()
+                            except Exception:
+                                pass
+                            asyncio.run_coroutine_threadsafe(
+                                websocket.send_json({
+                                    "type": "model_status",
+                                    **get_models_status(),
+                                }), loop
+                            )
+
+                        threading.Thread(
+                            target=install_missing_models,
+                            kwargs={
+                                "status_callback": status_callback,
+                                "post_install_callback": post_install_callback,
+                            },
+                            daemon=True,
+                        ).start()
+
                         await websocket.send_json({
                             "type": "model_status",
                             **get_models_status(),

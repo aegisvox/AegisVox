@@ -1,3 +1,4 @@
+import os
 import threading
 import urllib.request
 from pathlib import Path
@@ -7,7 +8,8 @@ from faster_whisper import download_model
 
 # Establish project-local storage paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-MODELS_DIR = BASE_DIR / "models"
+DEFAULT_MODELS_DIR = BASE_DIR / "models"
+MODELS_DIR = Path(os.environ.get("MODEL_PATH", str(DEFAULT_MODELS_DIR))).resolve()
 WHISPER_DIR = MODELS_DIR / "whisper"
 LLM_DIR = MODELS_DIR / "llm"
 
@@ -99,11 +101,22 @@ def get_models_status() -> dict:
         }
 
 
-def install_missing_models() -> None:
+def install_missing_models(
+    status_callback: Optional[Callable[[], None]] = None,
+    post_install_callback: Optional[Callable[[], None]] = None,
+) -> None:
     if INSTALL_STATE["in_progress"]:
         return
 
+    def safe_status_update() -> None:
+        if status_callback:
+            try:
+                status_callback()
+            except Exception:
+                pass
+
     _set_install_state(in_progress=True, progress=0.0, message="Preparing Gemma installation...", error=None)
+    safe_status_update()
 
     try:
         if not is_llm_ready():
@@ -114,17 +127,27 @@ def install_missing_models() -> None:
                 if total:
                     chunk_progress = min(1.0, max(0.0, downloaded / total))
                     _set_install_state(progress=chunk_progress, message=f"Downloading Gemma LLM... {int(chunk_progress * 100)}%")
+                    safe_status_update()
 
             download_file_with_progress(llm_url, llm_path, "Gemma LiteRT", progress_callback=llm_progress)
             _set_install_state(progress=1.0, message="Gemma LLM installed.")
+            safe_status_update()
         else:
             _set_install_state(progress=1.0, message="Gemma LLM already installed.")
+            safe_status_update()
 
     except Exception as exc:
         _set_install_state(in_progress=False, progress=1.0, message="Gemma installation failed.", error=str(exc))
+        safe_status_update()
         raise
     else:
         _set_install_state(in_progress=False, progress=1.0, message="Gemma installation complete.")
+        safe_status_update()
+        if post_install_callback:
+            try:
+                post_install_callback()
+            except Exception:
+                pass
 
 
 def ensure_models_ready() -> None:
