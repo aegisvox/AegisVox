@@ -21,9 +21,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && npm install -g npm@latest \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.12 -m ensurepip --upgrade \
-    && python3.12 -m pip install --no-cache-dir --upgrade pip setuptools wheel
-
 COPY package*.json ./
 RUN npm install --production && npm install --production typescript
 
