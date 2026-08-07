@@ -3,6 +3,7 @@ import json
 import os
 import re
 import threading
+from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -64,13 +65,47 @@ def get_combined_prompt(user_query: str) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{skills_context}\n\nUser Question: {user_query}"
 
 
-async def stream_assistant_reply(websocket: WebSocket, prompt: str) -> None:
+async def stream_assistant_reply(websocket: WebSocket, prompt: str, session_id: Optional[int] = None) -> None:
+    """Stream model output to the websocket and save the final response to a local JSON file.
+
+    The function will send incremental text chunks as they arrive and, when complete,
+    persist the assembled response and metadata under `backend/data/responses/`.
+    """
     await websocket.send_json({"type": "response_start"})
 
+    chunks: list[str] = []
+    full_text = ""
+
     for text_chunk in llm.stream_response(prompt):
-        await websocket.send_json({"type": "speech_chunk", "text": text_chunk})
+        # send immediate text chunk for the UI to render in realtime
+        await websocket.send_json({"type": "response_text", "text": text_chunk})
+        chunks.append(text_chunk)
+        full_text += text_chunk
 
     await websocket.send_json({"type": "response_end"})
+
+    # persist the response to disk
+    try:
+        responses_dir = os.path.join(os.path.dirname(__file__), "..", "data", "responses")
+        os.makedirs(responses_dir, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        filename = f"response-{session_id or 'anon'}-{timestamp}.json"
+        file_path = os.path.abspath(os.path.join(responses_dir, filename))
+
+        payload = {
+            "session_id": session_id,
+            "prompt": prompt,
+            "response": full_text,
+            "chunks": chunks,
+            "timestamp": timestamp,
+        }
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        print(f"💾 [Response Saved] {file_path}")
+    except Exception as e:
+        print(f"⚠️ [Response Save Failed] {e}")
 
 
 async def execute_skill_request(
@@ -266,7 +301,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
                                 if permission_required:
                                     continue
                                 if ai_reply is not None:
-                                    await stream_assistant_reply(websocket, ai_reply)
+                                    await stream_assistant_reply(websocket, ai_reply, session_id=session_id)
                                 continue
                         else:
                             await websocket.send_json({
@@ -343,11 +378,14 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
             # --- 4. STREAM LLM TEXT RESPONSE CHUNKS ---
             print(f"🗣️ [Streaming LLM Output] {user_text}")
-            await stream_assistant_reply(websocket, ai_reply)
+            await stream_assistant_reply(websocket, ai_reply, session_id=session_id)
             
     except WebSocketDisconnect:
         print("🛑 [WebSocket] Client Disconnected.")
     except Exception as e:
         print(f"⚠️ [WebSocket] Error during session: {e}")
-    finally:
-        db_service.close()
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    print("🔌 [Shutdown] Closing database connection.")
+    db_service.close()

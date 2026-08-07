@@ -81,6 +81,8 @@ export default function AssistantChat() {
   const [bubblePosition, setBubblePosition] = useState({ x: 0, y: 0 });
   const [isDraggingBubble, setIsDraggingBubble] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
+  const modelStatusRef = useRef<ModelStatus | null>(null);
+  const statusTimerRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
 
@@ -123,8 +125,21 @@ export default function AssistantChat() {
       sendSocketMessage({ type: 'get_model_status' });
     });
 
-    const statusTimer = window.setInterval(() => {
-      sendSocketMessage({ type: 'get_model_status' });
+    // Start a polling timer but only actually send status requests when needed.
+    statusTimerRef.current = window.setInterval(() => {
+      const ms = modelStatusRef.current;
+      const shouldSend = !ms || !ms.llmReady || ms.installing || Boolean(ms.error);
+      if (shouldSend) {
+        sendSocketMessage({ type: 'get_model_status' });
+      }
+
+      // If model is ready and not installing and there's no error, stop polling.
+      if (ms && ms.llmReady && !ms.installing && !ms.error) {
+        if (statusTimerRef.current) {
+          window.clearInterval(statusTimerRef.current);
+          statusTimerRef.current = null;
+        }
+      }
     }, 3000);
 
     const parseSafeJson = (value: string) => {
@@ -187,12 +202,8 @@ export default function AssistantChat() {
           return;
         }
 
-        if (message.type === 'response_start') {
-          setMessages((prev) => [...prev, { id: createMessageId(), role: 'assistant', content: '', isStreaming: true }]);
-          return;
-        }
-
-        if (message.type === 'speech_chunk' && typeof message.text === 'string') {
+        // handle streaming text chunks (arrive as `response_text`)
+        if (message.type === 'response_text' && typeof message.text === 'string') {
           setMessages((prev) => {
             const next = [...prev];
             const lastIndex = next.length - 1;
@@ -258,7 +269,10 @@ export default function AssistantChat() {
     });
 
     return () => {
-      window.clearInterval(statusTimer);
+      if (statusTimerRef.current) {
+        window.clearInterval(statusTimerRef.current);
+        statusTimerRef.current = null;
+      }
       socket.close();
 
       if (socketRef.current === socket) {
@@ -266,6 +280,18 @@ export default function AssistantChat() {
       }
     };
   }, []);
+
+  // Keep a ref of the latest model status so the timer callback can read it.
+  useEffect(() => {
+    modelStatusRef.current = modelStatus;
+
+    if (modelStatus && modelStatus.llmReady && !modelStatus.installing && !modelStatus.error) {
+      if (statusTimerRef.current) {
+        window.clearInterval(statusTimerRef.current);
+        statusTimerRef.current = null;
+      }
+    }
+  }, [modelStatus]);
 
   const startModelInstallation = async () => {
     if (installRequested) return;
