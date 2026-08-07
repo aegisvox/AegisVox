@@ -1,4 +1,6 @@
 from pathlib import Path
+from typing import Callable, Optional
+
 import litert_lm
 from backend.app.services.model_manager import LLM_DIR
 
@@ -8,7 +10,7 @@ class LLMService:
         self.model_path = LLM_DIR / model_filename
         self.engine = None
         self.system_prompt = litert_lm.Message.system(
-            "You are GemmaLive, an intelligent, local-first AI assistant. Keep your responses concise, natural, and friendly."
+            "You are AegisVox, an intelligent, local-first AI assistant. Keep your responses concise, natural, and friendly."
         )
         self.ready = False
         self._load_engine()
@@ -36,7 +38,7 @@ class LLMService:
     def reload_engine(self) -> None:
         self._load_engine()
 
-    def generate_response(self, user_prompt: str) -> str:
+    def generate_response(self, user_prompt: str, on_text: Optional[Callable[[str], None]] = None) -> str:
         """Generates a conversational response from the locally loaded Gemma model."""
         if not self.ensure_ready():
             return (
@@ -45,11 +47,29 @@ class LLMService:
             )
 
         full_reply = ""
-        for text_chunk in self.stream_response(user_prompt):
+        for text_chunk in self.stream_response(user_prompt, on_text=on_text):
             full_reply += text_chunk
         return full_reply.strip()
 
-    def stream_response(self, user_prompt: str):
+    def generate_stream(self, user_prompt: str, on_text: Optional[Callable[[str], None]] = None):
+        """Yields streaming text chunks for real-time consumption.
+
+        Example usage:
+            for chunk in llm_service.generate_stream("Tell me a long story."):
+                print(chunk, end="", flush=True)
+        """
+        if not self.ensure_ready():
+            yield (
+                f"I heard: '{user_prompt}', but the local LLM model is not installed yet. "
+                "Please install the local models from the UI."
+            )
+            return
+
+        # Delegate to the lower-level stream_response generator (real-time)
+        for text in self.stream_response(user_prompt, on_text=on_text):
+            yield text
+
+    def stream_response(self, user_prompt: str, on_text: Optional[Callable[[str], None]] = None):
         """Yields streaming text chunks from the locally loaded Gemma model."""
         if not self.ensure_ready():
             yield (
@@ -60,9 +80,18 @@ class LLMService:
 
         messages = [self.system_prompt, litert_lm.Message.user(user_prompt)]
         with self.engine.create_conversation(messages=messages) as conversation:
-            for chunk in conversation.send_message_async(user_prompt):
+            for chunk in conversation.send_message_async(
+                user_prompt,
+                thinking_config=litert_lm.ThinkingConfig(
+                    enable_thinking=True,
+                    thinking_token_budget=256
+                )
+            ):
                 for item in chunk.get("content", []):
+                    print(item)
                     if item.get("type") == "text":
                         text = item.get("text")
                         if text:
+                            if on_text:
+                                on_text(text)
                             yield text
