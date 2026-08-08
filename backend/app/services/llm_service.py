@@ -88,10 +88,10 @@ class LLMService:
                 )
             ):
                 for item in chunk.get("content", []):
-                    print(item)
                     if item.get("type") == "text":
                         text = item.get("text")
                         if text:
                             if on_text:
+                                print(text)
                                 on_text(text)
                             yield text

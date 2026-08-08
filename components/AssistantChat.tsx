@@ -3,6 +3,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 type SkillCanvasState = {
   active: boolean;
@@ -44,9 +46,93 @@ const createMessageId = () => `${Date.now()}-${Math.random().toString(16).slice(
 const humanizeSkillName = (name: string) => name.replace(/-/g, ' ');
 
 function renderMarkdownContent(text: string) {
+  function MarkdownCodeBlock({ inline, className, children, ...props }: any) {
+    const [copied, setCopied] = useState(false);
+
+    const code = String(children ?? '').replace(/\n$/, '');
+    const languageMatch = /language-(\w+)/.exec(className || '');
+    const language = languageMatch?.[1] || 'text';
+
+    const handleCopy = async () => {
+      try {
+        await navigator.clipboard.writeText(code);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      } catch {
+        setCopied(false);
+      }
+    };
+
+    if (inline) {
+      return (
+        <code
+          className="rounded-md border border-cyan-400/15 bg-slate-900/80 px-1.5 py-0.5 font-mono text-[0.92em] text-cyan-200"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
+
+    return (
+      <div className="my-3 overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-950/95 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]">
+        <div className="flex items-center justify-between border-b border-slate-800/90 bg-slate-900/90 px-3 py-2 text-[11px] uppercase tracking-[0.24em] text-slate-300">
+          <span>{language}</span>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[10px] tracking-[0.2em] text-cyan-200 transition hover:bg-cyan-400/20"
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        <SyntaxHighlighter
+          language={language}
+          style={oneDark}
+          customStyle={{
+            margin: 0,
+            padding: '1rem 1rem 1.1rem',
+            background: 'transparent',
+            fontSize: '0.85rem',
+            lineHeight: '1.6',
+            overflowX: 'auto',
+          }}
+          codeTagProps={{
+            style: {
+              fontFamily: 'var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace',
+            },
+          }}
+          PreTag="div"
+          {...props}
+        >
+          {code}
+        </SyntaxHighlighter>
+      </div>
+    );
+  }
+
   return (
-    <div className="prose prose-invert max-w-none text-sm leading-7 text-slate-200 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-pre:overflow-x-auto prose-pre:rounded-2xl prose-pre:border prose-pre:border-cyan-400/20 prose-pre:bg-slate-950/70 prose-pre:p-3 prose-code:rounded prose-code:bg-slate-800/80 prose-code:px-1.5 prose-code:py-0.5 prose-code:font-mono prose-code:text-cyan-300 prose-a:text-cyan-300 prose-a:no-underline hover:prose-a:underline">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    <div className="prose prose-invert max-w-none text-sm leading-7 text-slate-200 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-a:text-cyan-300 prose-a:no-underline hover:prose-a:underline">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code: MarkdownCodeBlock,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function TypingBubble() {
+  return (
+    <div className="flex items-center gap-2 text-sm text-slate-300">
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/15 bg-white/5 px-3 py-2">
+        <span className="h-2 w-2 animate-[pulse_1s_ease-in-out_infinite] rounded-full bg-cyan-300 [animation-delay:0ms]" />
+        <span className="h-2 w-2 animate-[pulse_1s_ease-in-out_infinite] rounded-full bg-cyan-300 [animation-delay:150ms]" />
+        <span className="h-2 w-2 animate-[pulse_1s_ease-in-out_infinite] rounded-full bg-cyan-300 [animation-delay:300ms]" />
+      </span>
     </div>
   );
 }
@@ -163,6 +249,21 @@ export default function AssistantChat() {
 
         if (message.type === 'device_code' && typeof message.code === 'string') {
           setDeviceCode(message.code);
+          return;
+        }
+
+        if (message.type === 'response_start') {
+          setMessages((prev) => {
+            const next = [...prev];
+            const lastIndex = next.length - 1;
+
+            if (lastIndex >= 0 && next[lastIndex].role === 'assistant' && next[lastIndex].isStreaming) {
+              return next;
+            }
+
+            next.push({ id: createMessageId(), role: 'assistant', content: '', isStreaming: true });
+            return next;
+          });
           return;
         }
 
@@ -359,7 +460,11 @@ export default function AssistantChat() {
       if (!inputText.trim()) return;
 
       const trimmedPrompt = inputText.trim();
-      setMessages((prev) => [...prev, { id: createMessageId(), role: 'user', content: trimmedPrompt }]);
+      setMessages((prev) => [
+        ...prev,
+        { id: createMessageId(), role: 'user', content: trimmedPrompt },
+        { id: createMessageId(), role: 'assistant', content: '', isStreaming: true },
+      ]);
       sendPrompt(trimmedPrompt);
       setInputText('');
     }
@@ -419,6 +524,7 @@ export default function AssistantChat() {
   };
 
   const isLlmMissing = modelStatus ? !modelStatus.llmReady : false;
+  const installProgressPercent = Math.max(0, Math.min(100, Math.round((modelStatus?.progress ?? 0) * 100)));
 
   return (
     <div className="fixed inset-0 h-dvh overflow-hidden bg-black text-white">
@@ -479,8 +585,8 @@ export default function AssistantChat() {
         </div>
       )}
 
-      <div className={`pointer-events-none absolute inset-0 z-10 flex px-3 py-3 pb-24 sm:px-6 sm:py-4 sm:pb-28 lg:px-8 ${showCanvas && skillCanvas?.mode === 'bubble' ? 'pt-20 sm:pt-40' : ''}`}>
-          <div className="pointer-events-auto mx-auto flex h-full w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 custom-scrollbar">
+          <div className={`pointer-events-none absolute inset-0 z-[9999] flex min-h-0 px-3 py-3 pb-24 sm:px-6 sm:py-4 sm:pb-28 lg:px-8 ${showCanvas && skillCanvas?.mode === 'bubble' ? 'pt-20 sm:pt-40' : ''}`}>
+            <div className="pointer-events-auto mx-auto flex h-full min-h-0 w-full max-w-5xl flex-col gap-3 overflow-y-auto p-2 sm:p-4 custom-scrollbar">
             {messages.length === 0 ? (
               <div className="rounded-2xl px-3 py-2 text-sm text-slate-200 sm:px-4 sm:py-3">
                 
@@ -506,10 +612,7 @@ export default function AssistantChat() {
                       {isUser ? 'You' : isSystem ? 'Skill' : 'Aegis'}
                     </div>
                     {message.isStreaming && !message.content ? (
-                      <div className="flex items-center gap-2 text-sm text-slate-300">
-                        <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-300" />
-                        Thinking…
-                      </div>
+                      <TypingBubble />
                     ) : message.html ? (
                       <HtmlContent html={message.html} />
                     ) : (
@@ -555,44 +658,30 @@ export default function AssistantChat() {
           <div className="absolute inset-x-0 -top-[1px] h-[calc(100%+3px)] rounded-full bg-cyan-400/20 blur-3xl" />
           <div className="absolute inset-x-0 -top-[1px] h-[calc(100%+3px)] rounded-full bg-blue-500/15 blur-3xl" />
           <div className="relative mx-auto w-full max-w-5xl">
-            {isLlmMissing ? (
-              <div className="rounded-full border border-cyan-400/20 bg-[#111217] px-4 py-3 text-sm text-slate-300 transition sm:px-6 sm:py-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="font-semibold text-white">Gemma LLM is required</div>
-                    <div className="text-xs text-slate-400">Install the local model to enable the chat input.</div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => startModelInstallation()}
-                      disabled={installRequested || modelStatus?.installing}
-                      className="rounded-full bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {modelStatus?.installing ? 'Installing…' : 'Install Gemma LLM'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setModelStatus((prev) => prev ? { ...prev, message: 'Installation deferred.' } : prev)}
-                      className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
-                    >
-                      Defer
-                    </button>
-                  </div>
+            {isLlmMissing ? modelStatus?.installing ? (
+              <div className="relative flex h-[52px] w-full items-center justify-center overflow-hidden rounded-full border border-cyan-400/20 bg-[#111217] px-4 text-sm text-slate-200 transition sm:h-[56px] sm:px-6">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-cyan-300/25 transition-[width] duration-300 ease-out"
+                  style={{ width: `${installProgressPercent}%` }}
+                />
+                <div className="absolute inset-0 bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.12),transparent)] opacity-40" />
+                <div className="relative z-10 text-base font-semibold text-cyan-50">
+                  {installProgressPercent}%
                 </div>
-                <div className="mt-3 rounded-3xl border border-slate-800/70 bg-slate-900/80 p-3 text-sm text-slate-200">
-                  <div className="mb-2 text-xs uppercase tracking-[0.24em] text-slate-500">Installation progress</div>
-                  <div className="h-3 overflow-hidden rounded-full bg-slate-800">
-                    <div
-                      className="h-full rounded-full bg-cyan-400 transition-all duration-300"
-                      style={{ width: `${Math.round((modelStatus?.progress ?? 0) * 100)}%` }}
-                    />
-                  </div>
-                  <div className="mt-2 flex items-center justify-between text-[11px] uppercase tracking-[0.2em] text-slate-500">
-                    <span>{modelStatus?.message}</span>
-                    <span>{Math.round((modelStatus?.progress ?? 0) * 100)}%</span>
-                  </div>
+              </div>
+            ) : (
+              <div className="flex h-[52px] w-full items-center justify-between gap-3 rounded-full border border-cyan-400/20 bg-[#111217] px-4 text-sm text-slate-300 transition sm:h-[56px] sm:px-6">
+                <div className="min-w-0 flex-1 text-sm text-slate-200">
+                  Gemma 4 is not installed, please install it by clicking on this button
                 </div>
+                <button
+                  type="button"
+                  onClick={() => startModelInstallation()}
+                  disabled={installRequested || modelStatus?.installing}
+                  className="shrink-0 rounded-full bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Install
+                </button>
               </div>
             ) : (
               <input

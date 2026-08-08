@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import re
 import threading
 from datetime import datetime
 from typing import Optional
@@ -21,13 +20,19 @@ from backend.app.services.model_manager import get_models_status, install_missin
 
 app = FastAPI(title="GemmaLive Backend", version="1.0.0")
 
+
+def get_live_model_status() -> dict:
+    status = get_models_status()
+    status["llmReady"] = bool(llm.ready) and not status.get("installing", False)
+    return status
+
 @app.get("/models/status")
 async def models_status():
-    return get_models_status()
+    return get_live_model_status()
 
 @app.post("/models/install")
 async def models_install():
-    if get_models_status().get("installing"):
+    if get_live_model_status().get("installing"):
         return {"started": False, "message": "Installation already in progress."}
 
     threading.Thread(target=install_missing_models, daemon=True).start()
@@ -65,19 +70,20 @@ def get_combined_prompt(user_query: str) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{skills_context}\n\nUser Question: {user_query}"
 
 
-async def stream_assistant_reply(websocket: WebSocket, prompt: str, session_id: Optional[int] = None) -> None:
-    """Stream model output to the websocket and save the final response to a local JSON file.
-
-    The function will send incremental text chunks as they arrive and, when complete,
-    persist the assembled response and metadata under `backend/data/responses/`.
-    """
+async def stream_assistant_reply(
+    websocket: WebSocket,
+    prompt: str,
+    session_id: Optional[int] = None,
+    prompt_text: Optional[str] = None,
+) -> None:
+    """Stream model output to the websocket and save the final response to disk."""
     await websocket.send_json({"type": "response_start"})
 
     chunks: list[str] = []
     full_text = ""
 
     for text_chunk in llm.stream_response(prompt):
-        # send immediate text chunk for the UI to render in realtime
+        print(f"🗣️ [Streaming Chunk] {text_chunk}")
         await websocket.send_json({"type": "response_text", "text": text_chunk})
         chunks.append(text_chunk)
         full_text += text_chunk
@@ -94,7 +100,49 @@ async def stream_assistant_reply(websocket: WebSocket, prompt: str, session_id: 
 
         payload = {
             "session_id": session_id,
-            "prompt": prompt,
+            "prompt": prompt_text or "",
+            "response": full_text,
+            "chunks": chunks,
+            "timestamp": timestamp,
+        }
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        print(f"💾 [Response Saved] {file_path}")
+    except Exception as e:
+        print(f"⚠️ [Response Save Failed] {e}")
+
+
+async def stream_text_reply(
+    websocket: WebSocket,
+    response_text: str,
+    session_id: Optional[int] = None,
+    prompt_text: Optional[str] = None,
+) -> None:
+    """Stream already-generated assistant text to the websocket and save it to disk."""
+    await websocket.send_json({"type": "response_start"})
+
+    chunks: list[str] = []
+    full_text = ""
+
+    for text_chunk in response_text.splitlines(keepends=True) or [response_text]:
+        await websocket.send_json({"type": "response_text", "text": text_chunk})
+        chunks.append(text_chunk)
+        full_text += text_chunk
+
+    await websocket.send_json({"type": "response_end"})
+
+    try:
+        responses_dir = os.path.join(os.path.dirname(__file__), "..", "data", "responses")
+        os.makedirs(responses_dir, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        filename = f"response-{session_id or 'anon'}-{timestamp}.json"
+        file_path = os.path.abspath(os.path.join(responses_dir, filename))
+
+        payload = {
+            "session_id": session_id,
+            "prompt": prompt_text or "",
             "response": full_text,
             "chunks": chunks,
             "timestamp": timestamp,
@@ -223,15 +271,15 @@ async def websocket_live_endpoint(websocket: WebSocket):
                     elif payload.get("type") == "get_model_status":
                         await websocket.send_json({
                             "type": "model_status",
-                            **get_models_status(),
+                            **get_live_model_status(),
                         })
                         continue
 
                     elif payload.get("type") == "install_models":
-                        if get_models_status().get("installing"):
+                        if get_live_model_status().get("installing"):
                             await websocket.send_json({
                                 "type": "model_status",
-                                **get_models_status(),
+                                **get_live_model_status(),
                             })
                             continue
 
@@ -241,7 +289,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
                             asyncio.run_coroutine_threadsafe(
                                 websocket.send_json({
                                     "type": "model_status",
-                                    **get_models_status(),
+                                    **get_live_model_status(),
                                 }), loop
                             )
 
@@ -253,7 +301,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
                             asyncio.run_coroutine_threadsafe(
                                 websocket.send_json({
                                     "type": "model_status",
-                                    **get_models_status(),
+                                    **get_live_model_status(),
                                 }), loop
                             )
 
@@ -268,7 +316,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
                         await websocket.send_json({
                             "type": "model_status",
-                            **get_models_status(),
+                            **get_live_model_status(),
                         })
                         continue
 
@@ -301,7 +349,12 @@ async def websocket_live_endpoint(websocket: WebSocket):
                                 if permission_required:
                                     continue
                                 if ai_reply is not None:
-                                    await stream_assistant_reply(websocket, ai_reply, session_id=session_id)
+                                    await stream_text_reply(
+                                        websocket,
+                                        ai_reply,
+                                        session_id=session_id,
+                                        prompt_text=request["user_text"],
+                                    )
                                 continue
                         else:
                             await websocket.send_json({
@@ -378,7 +431,12 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
             # --- 4. STREAM LLM TEXT RESPONSE CHUNKS ---
             print(f"🗣️ [Streaming LLM Output] {user_text}")
-            await stream_assistant_reply(websocket, ai_reply, session_id=session_id)
+            await stream_assistant_reply(
+                websocket,
+                full_prompt,
+                session_id=session_id,
+                prompt_text=user_text,
+            )
             
     except WebSocketDisconnect:
         print("🛑 [WebSocket] Client Disconnected.")
