@@ -70,7 +70,7 @@ def get_combined_prompt(user_query: str) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n{skills_context}\n\nUser Question: {user_query}"
 
 
-async def stream_assistant_reply(
+async def stream_model_reply(
     websocket: WebSocket,
     prompt: str,
     session_id: Optional[int] = None,
@@ -226,8 +226,13 @@ async def execute_skill_request(
         f"You executed skill '{skill_name}' and got result:\n{script_output}\n"
         f"Summarize this answer in a conversational, spoken tone."
     )
-    ai_reply = llm.generate_response(followup_prompt)
-    return ai_reply, False
+    await stream_model_reply(
+        websocket,
+        followup_prompt,
+        session_id=session_id,
+        prompt_text=user_text,
+    )
+    return None, False
 
 
 @app.websocket("/ws/live")
@@ -431,9 +436,9 @@ async def websocket_live_endpoint(websocket: WebSocket):
 
             # --- 4. STREAM LLM TEXT RESPONSE CHUNKS ---
             print(f"🗣️ [Streaming LLM Output] {user_text}")
-            await stream_assistant_reply(
+            await stream_text_reply(
                 websocket,
-                full_prompt,
+                ai_reply,
                 session_id=session_id,
                 prompt_text=user_text,
             )
