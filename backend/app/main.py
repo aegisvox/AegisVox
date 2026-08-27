@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
@@ -18,7 +19,13 @@ from backend.app.services.db_service import DBService
 from backend.app.services.tool_call_parser import extract_tool_call
 from backend.app.services.model_manager import get_models_status, install_missing_models
 
-app = FastAPI(title="GemmaLive Backend", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    print("🔌 [Shutdown] Closing database connection.")
+    db_service.close()
+
+app = FastAPI(title="GemmaLive Backend", version="1.0.0", lifespan=lifespan)
 
 
 def get_live_model_status() -> dict:
@@ -38,9 +45,15 @@ async def models_install():
     threading.Thread(target=install_missing_models, daemon=True).start()
     return {"started": True, "installing": True, "message": "Model installation started."}
 
+allowed_origins_env = os.environ.get("ALLOWED_ORIGINS", "")
+if allowed_origins_env.strip():
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+else:
+    allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -447,8 +460,3 @@ async def websocket_live_endpoint(websocket: WebSocket):
         print("🛑 [WebSocket] Client Disconnected.")
     except Exception as e:
         print(f"⚠️ [WebSocket] Error during session: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    print("🔌 [Shutdown] Closing database connection.")
-    db_service.close()

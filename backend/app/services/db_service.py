@@ -14,6 +14,7 @@ class DBService:
 
     def _initialize(self) -> None:
         cursor = self.connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (

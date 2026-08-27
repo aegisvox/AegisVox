@@ -45,8 +45,10 @@ type AuthorizationPromptState = {
 const createMessageId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const humanizeSkillName = (name: string) => name.replace(/-/g, ' ');
 
+import type { Components } from 'react-markdown';
+
 function renderMarkdownContent(text: string) {
-  function MarkdownCodeBlock({ inline, className, children, ...props }: any) {
+  const MarkdownCodeBlock: NonNullable<Components['code']> = ({ inline, className, children, ...props }: React.ComponentPropsWithoutRef<'code'> & { inline?: boolean }) => {
     const [copied, setCopied] = useState(false);
 
     const code = String(children ?? '').replace(/\n$/, '');
