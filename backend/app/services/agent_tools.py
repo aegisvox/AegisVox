@@ -16,9 +16,15 @@ class AgentTools:
         if not skill:
             return False, f"Skill '{skill_name}' not found."
 
-        script_path = os.path.join(skill.root_path, "scripts", script_name)
+        safe_script_name = os.path.basename(script_name)
+        scripts_dir = os.path.abspath(os.path.join(skill.root_path, "scripts"))
+        script_path = os.path.abspath(os.path.join(scripts_dir, safe_script_name))
+
+        if not script_path.startswith(scripts_dir + os.sep) and script_path != scripts_dir:
+            return False, f"Access denied for script path outside of skill directory."
+
         if not os.path.exists(script_path):
-            return False, f"Script '{script_name}' not found inside {skill_name}."
+            return False, f"Script '{safe_script_name}' not found inside {skill_name}."
 
         ext = os.path.splitext(script_name)[1].lower()
         interpreters = {".py": "python3", ".js": "node", ".sh": "bash"}
